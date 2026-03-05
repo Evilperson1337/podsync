@@ -23,6 +23,8 @@ func New(ctx context.Context, provider model.Provider, key string, downloader Do
 		return NewSoundcloudBuilder()
 	case model.ProviderTwitch:
 		return NewTwitchBuilder(key)
+	case model.ProviderRumble:
+		return NewRumbleBuilder(key)
 	default:
 		return nil, errors.Errorf("unsupported provider %q", provider)
 	}

@@ -149,3 +149,47 @@ func TestParseVimeoURL_InvalidLink(t *testing.T) {
 	_, _, err = parseVimeoURL(link)
 	require.Error(t, err)
 }
+
+func TestParseRumbleURL_Channel(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com/c/DrDisrespect")
+	kind, id, err := parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypeChannel, kind)
+	require.Equal(t, "DrDisrespect", id)
+
+	link, _ = url.ParseRequestURI("https://rumble.com/c/DrDisrespect/videos")
+	kind, id, err = parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypeChannel, kind)
+	require.Equal(t, "DrDisrespect", id)
+}
+
+func TestParseRumbleURL_Livestreams(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com/c/StevenCrowder/livestreams")
+	kind, id, err := parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypeLivestreams, kind)
+	require.Equal(t, "StevenCrowder", id)
+}
+
+func TestParseRumbleURL_User(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com/user/SomeChannel")
+	kind, id, err := parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypeChannel, kind)
+	require.Equal(t, "SomeChannel", id)
+}
+
+func TestParseRumbleURL_Invalid(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com/")
+	_, _, err := parseRumbleURL(link)
+	require.Error(t, err)
+
+	link, _ = url.ParseRequestURI("https://rumble.com/c/")
+	_, _, err = parseRumbleURL(link)
+	require.Error(t, err)
+
+	link, _ = url.ParseRequestURI("https://rumble.com/other/123")
+	_, _, err = parseRumbleURL(link)
+	require.Error(t, err)
+}

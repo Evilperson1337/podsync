@@ -10,6 +10,18 @@ type KeyProvider interface {
 	Get() string
 }
 
+type StaticKeyProvider struct {
+	key string
+}
+
+func NewStaticKeyProvider(key string) KeyProvider {
+	return StaticKeyProvider{key: key}
+}
+
+func (p StaticKeyProvider) Get() string {
+	return p.key
+}
+
 func NewKeyProvider(keys []string) (KeyProvider, error) {
 	switch len(keys) {
 	case 0:

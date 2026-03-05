@@ -197,6 +197,7 @@ func (c *Config) applyEnv() {
 		model.ProviderVimeo:      "PODSYNC_VIMEO_API_KEY",
 		model.ProviderSoundcloud: "PODSYNC_SOUNDCLOUD_API_KEY",
 		model.ProviderTwitch:     "PODSYNC_TWITCH_API_KEY",
+		model.ProviderRumble:     "PODSYNC_RUMBLE_API_KEY",
 	}
 
 	// Replace API keys from config with environment variables
@@ -220,6 +221,19 @@ func (c *Config) applyEnv() {
 type StringSlice []string
 
 func (s *StringSlice) UnmarshalTOML(v interface{}) error {
+	if list, ok := v.([]interface{}); ok {
+		result := make([]string, 0, len(list))
+		for _, entry := range list {
+			value, ok := entry.(string)
+			if !ok {
+				return errors.New("failed to decode string slice field")
+			}
+			result = append(result, value)
+		}
+		*s = result
+		return nil
+	}
+
 	if str, ok := v.(string); ok {
 		*s = []string{str}
 		return nil

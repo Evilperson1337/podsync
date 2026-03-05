@@ -145,6 +145,9 @@ func main() {
 		}
 		keys[name] = provider
 	}
+	if _, ok := keys[model.ProviderRumble]; !ok {
+		keys[model.ProviderRumble] = feed.NewStaticKeyProvider("")
+	}
 
 	log.Debug("creating update manager")
 	manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, downloader, database, storage)

@@ -19,7 +19,7 @@ any device in podcast client.
 
 ## ✨ Features
 
-- Works with YouTube and Vimeo.
+- Works with YouTube, Vimeo, SoundCloud, Twitch, and Rumble.
 - Supports feeds configuration: video/audio, high/low quality, max video height, etc.
 - mp3 encoding
 - Update scheduler supports cron expressions
@@ -88,6 +88,12 @@ youtube = "PASTE YOUR API KEY HERE" # See config.toml.example for environment va
 [feeds]
     [feeds.ID1]
     url = "https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ"
+
+    [feeds.RUMBLE_VIDEOS]
+    url = "https://rumble.com/c/DrDisrespect"
+
+    [feeds.RUMBLE_LIVE]
+    url = "https://rumble.com/c/StevenCrowder/livestreams"
 ```
 
 If you want to hide Podsync behind reverse proxy like nginx, you can use `hostname` field:

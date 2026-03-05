@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/BrianHicks/finch v0.0.0-20140409222414-419bd73c29ec
+	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/aws/aws-sdk-go v1.44.144
 	github.com/dgraph-io/badger v1.6.2
 	github.com/eduncan911/podcast v1.4.2
@@ -31,6 +32,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect
+	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

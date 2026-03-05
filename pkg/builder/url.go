@@ -69,6 +69,19 @@ func ParseURL(link string) (model.Info, error) {
 		return info, nil
 	}
 
+	if strings.HasSuffix(parsed.Host, "rumble.com") {
+		kind, id, err := parseRumbleURL(parsed)
+		if err != nil {
+			return model.Info{}, err
+		}
+
+		info.Provider = model.ProviderRumble
+		info.LinkType = kind
+		info.ItemID = id
+
+		return info, nil
+	}
+
 	return model.Info{}, errors.New("unsupported URL host")
 }
 
@@ -240,4 +253,31 @@ func parseTwitchURL(parsed *url.URL) (model.Type, string, error) {
 	}
 
 	return kind, id, nil
+}
+
+func parseRumbleURL(parsed *url.URL) (model.Type, string, error) {
+	path := strings.TrimSuffix(parsed.EscapedPath(), "/")
+	if path == "" || path == "/" {
+		return "", "", errors.New("invalid rumble link path")
+	}
+
+	parts := strings.Split(path, "/")
+	if len(parts) < 3 {
+		return "", "", errors.New("invalid rumble link path")
+	}
+
+	if parts[1] != "c" && parts[1] != "user" {
+		return "", "", errors.New("invalid rumble link path")
+	}
+
+	id := parts[2]
+	if id == "" {
+		return "", "", errors.New("invalid rumble channel id")
+	}
+
+	if len(parts) >= 4 && parts[3] == "livestreams" {
+		return model.TypeLivestreams, id, nil
+	}
+
+	return model.TypeChannel, id, nil
 }

@@ -136,6 +136,10 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 		return err
 	}
 
+	if err := u.updateEpisodeDurations(feedConfig.ID, result.Episodes); err != nil {
+		return err
+	}
+
 	for _, episode := range result.Episodes {
 		delete(episodeSet, episode.ID)
 	}
@@ -150,6 +154,25 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 	}
 
 	log.Debug("successfully saved updates to storage")
+	return nil
+}
+
+func (u *Manager) updateEpisodeDurations(feedID string, episodes []*model.Episode) error {
+	for _, episode := range episodes {
+		if episode == nil || episode.ID == "" || episode.Duration <= 0 {
+			continue
+		}
+		err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+			if existing.Duration > 0 {
+				return nil
+			}
+			existing.Duration = episode.Duration
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
