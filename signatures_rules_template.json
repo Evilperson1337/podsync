@@ -1,0 +1,22 @@
+{
+  "rules": [
+    {
+      "file": "intro.wav",
+      "action": "cut_before",
+      "pre": 0,
+      "post": 0
+    },
+    {
+      "file": "segment.wav",
+      "action": "remove_segment",
+      "pre": 5,
+      "post": 10
+    },
+    {
+      "file": "outro.wav",
+      "action": "cut_after",
+      "pre": 0,
+      "post": 0
+    }
+  ]
+}

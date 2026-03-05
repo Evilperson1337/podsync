@@ -18,6 +18,19 @@ builds:
       - amd64
       - arm
       - arm64
+      
+  - id: audiosplitdetect
+    main: ./cmd/audiosplitdetect/
+    binary: audiosplitdetect
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: arc

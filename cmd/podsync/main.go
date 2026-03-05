@@ -221,7 +221,8 @@ func main() {
 
 			// Only perform initial update if no explicit cron schedule is configured
 			// This prevents unwanted updates when using fixed schedules in Docker deployments
-			if !hasExplicitCronSchedule {
+			// If --no-banner is used (Docker default), still perform an initial update
+			if !hasExplicitCronSchedule || opts.NoBanner {
 				updates <- cronFeed
 			}
 		}

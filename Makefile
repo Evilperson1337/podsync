@@ -11,6 +11,10 @@ all: build test
 
 GOARCH ?= $(shell go env GOARCH)
 GOOS ?= $(shell go env GOOS)
+BINEXT :=
+ifeq ($(GOOS),windows)
+BINEXT := .exe
+endif
 
 TAG ?= $(shell git tag --points-at HEAD)
 COMMIT ?= $(shell git rev-parse --short HEAD)
@@ -27,7 +31,8 @@ LDFLAGS := "-s -w -X 'main.version=${TAG}' -X 'main.commit=${COMMIT}' -X 'main.d
 
 .PHONY: build
 build:
-	go build -trimpath -tags netgo -ldflags ${LDFLAGS} -o bin/podsync ./cmd/podsync
+	go build -trimpath -tags netgo -ldflags ${LDFLAGS} -o bin/podsync$(BINEXT) ./cmd/podsync
+	go build -trimpath -tags netgo -ldflags ${LDFLAGS} -o bin/audiosplitdetect$(BINEXT) ./cmd/audiosplitdetect
 
 #
 # Build a local Docker image
