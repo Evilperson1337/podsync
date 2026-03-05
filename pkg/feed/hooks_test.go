@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,9 @@ import (
 )
 
 func TestExecuteHook_WriteEnvToFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires sh")
+	}
 	// Create a temporary file
 	tempDir := t.TempDir()
 	tempFile := filepath.Join(tempDir, "env_output.txt")
@@ -82,6 +86,9 @@ func TestExecuteHook_CornerCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && tt.name == "successful command" {
+				t.Skip("requires echo executable")
+			}
 			err := tt.hook.Invoke(tt.env)
 
 			if tt.expectError {
@@ -97,6 +104,9 @@ func TestExecuteHook_CornerCases(t *testing.T) {
 }
 
 func TestExecuteHook_CurlWebhook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires curl and sh")
+	}
 	// Create a local test server to avoid external dependencies
 	receivedData := ""
 	receivedHeaders := make(map[string]string)
