@@ -3,11 +3,11 @@ package model
 type Type string
 
 const (
-	TypeChannel  = Type("channel")
-	TypePlaylist = Type("playlist")
-	TypeUser     = Type("user")
-	TypeGroup    = Type("group")
-	TypeHandle   = Type("handle")
+	TypeChannel     = Type("channel")
+	TypePlaylist    = Type("playlist")
+	TypeUser        = Type("user")
+	TypeGroup       = Type("group")
+	TypeHandle      = Type("handle")
 	TypeLivestreams = Type("livestreams")
 )
 
