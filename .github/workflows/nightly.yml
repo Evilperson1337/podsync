@@ -1,11 +1,10 @@
 name: Nightly
 
 on:
-  schedule:
-    - cron: "0 0 * * *" # Every day at midnight
+  workflow_dispatch:
   push:
-    paths:
-      - ".github/workflows/nightly.yml"
+    branches:
+      - main
 
 env:
   REGISTRY: ghcr.io
