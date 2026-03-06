@@ -23,6 +23,18 @@ type Local struct {
 	WebUIEnabled bool
 }
 
+// RootDir returns the configured root directory for local storage.
+// Inputs: none.
+// Outputs: root directory path.
+// Example usage:
+//
+//	root := local.RootDir()
+//
+// Notes: Used to derive related paths (e.g., signatures directory).
+func (l *Local) RootDir() string {
+	return l.rootDir
+}
+
 func NewLocal(rootDir string, webUIEnabled bool) (*Local, error) {
 	return &Local{rootDir: rootDir, WebUIEnabled: webUIEnabled}, nil
 }

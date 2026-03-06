@@ -50,6 +50,8 @@ brew install yt-dlp ffmpeg go
 - [How to get YouTube API Key](./docs/how_to_get_youtube_api_key.md)
 - [Podsync on QNAP NAS Guide](./docs/how_to_setup_podsync_on_qnap_nas.md)
 - [Schedule updates with cron](./docs/cron.md)
+- [Audio signature detection](./docs/audio_signature_detection.md)
+- [Audio signature examples (Windows)](./docs/audio_signature_examples.md)
 
 ## 🌙 Nightly builds
 

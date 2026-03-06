@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -35,6 +36,7 @@ type Manager struct {
 	fs         fs.Storage
 	feeds      map[string]*feed.Config
 	keys       map[model.Provider]feed.KeyProvider
+	sigDir     string
 }
 
 func NewUpdater(
@@ -43,15 +45,27 @@ func NewUpdater(
 	hostname string,
 	downloader Downloader,
 	db db.Storage,
-	fs fs.Storage,
+	storage fs.Storage,
 ) (*Manager, error) {
+	sigDir := os.Getenv("PODSYNC_SIGNATURES_DIR")
+	if sigDir == "" {
+		sigDir = "/data"
+	}
+	if localFS, ok := storage.(*fs.Local); ok {
+		sigDir = localFS.RootDir()
+	}
+	log.WithFields(log.Fields{
+		"signatures_root": sigDir,
+		"signatures_dir":  filepath.Join(sigDir, "<feed_id>", "signatures"),
+	}).Info("signature trim enabled")
 	return &Manager{
 		hostname:   hostname,
 		downloader: downloader,
 		db:         db,
-		fs:         fs,
+		fs:         storage,
 		feeds:      feeds,
 		keys:       keys,
+		sigDir:     sigDir,
 	}, nil
 }
 
@@ -306,11 +320,32 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		}
 
 		logger.Debug("copying file")
-		fileSize, err := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), tempFile)
+		trimmedReader, trimmedCleanup, err := u.trimEpisodeIfSignatureFound(ctx, feedConfig, episode, tempFile)
+		if err != nil {
+			tempFile.Close()
+			logger.WithError(err).Error("signature trim failed")
+			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+				episode.Status = model.EpisodeError
+				return nil
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		if trimmedCleanup != nil {
+			defer trimmedCleanup()
+		}
+		fileSize, err := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), trimmedReader)
 		tempFile.Close()
 		if err != nil {
+			if trimmedCleanup != nil {
+				trimmedCleanup()
+			}
 			logger.WithError(err).Error("failed to copy file")
 			return err
+		}
+		if trimmedCleanup != nil {
+			trimmedCleanup()
 		}
 
 		// Execute post episode download hooks
