@@ -53,9 +53,10 @@ func EnvelopeStream(r io.Reader, cfg EnvelopeConfig) (EnvelopeStats, error) {
 			return EnvelopeStats{}, err
 		}
 	}
+	// Match ComputeEnvelope behavior: drop incomplete trailing frame.
 	if frameSamples > 0 {
-		rms := math.Sqrt(frameSum/float64(frameSamples) + 1e-12)
-		env = append(env, math.Log1p(rms))
+		// Intentionally discard partial frame to keep frame counts aligned.
+		// This ensures stream and batch envelopes produce the same length.
 	}
 	if len(env) < 2 {
 		return EnvelopeStats{Values: []float64{}, FrameSize: frameSize, DurationSeconds: float64(totalSamples) / float64(cfg.SampleRate)}, nil

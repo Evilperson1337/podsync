@@ -14,46 +14,6 @@ import (
 	"github.com/mxpv/podsync/pkg/audiosig"
 )
 
-// applySignatureRule applies a single trim rule and returns the new input file path.
-// Inputs:
-// - ctx: context for cancellation.
-// - inputPath: current input file path.
-// - result: detection result for the signature.
-// - rule: rule to apply.
-// - logger: logger for structured output.
-// Outputs: new input path, cleanup func, error.
-// Example usage:
-//
-//	newPath, cleanup, err := u.applySignatureRule(ctx, inputPath, result, rule, logger)
-//
-// Notes: Returns original input if no trim is needed.
-func (u *Manager) applySignatureRule(ctx context.Context, inputPath string, result audiosig.Result, rule SignatureRule, logger log.FieldLogger) (string, func(), error) {
-	inputDur := result.InputDuration
-	start := result.SignatureStart - time.Duration(rule.PreSeconds*float64(time.Second))
-	end := result.SignatureEnd + time.Duration(rule.PostSeconds*float64(time.Second))
-	if start < 0 {
-		start = 0
-	}
-	if end < 0 {
-		end = 0
-	}
-	if end > inputDur {
-		end = inputDur
-	}
-
-	switch rule.Action {
-	case "cut_before":
-		return u.trimKeepRange(ctx, inputPath, end, inputDur, logger)
-	case "cut_after":
-		return u.trimKeepRange(ctx, inputPath, 0, start, logger)
-	case "remove_segment":
-		return u.trimRemoveRange(ctx, inputPath, start, end, logger)
-	default:
-		logger.WithField("action", rule.Action).Warn("[trim] unknown action; skipping")
-		return inputPath, func() {}, nil
-	}
-}
-
 type timeRange struct {
 	start time.Duration
 	end   time.Duration
@@ -171,96 +131,6 @@ func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart
 	return trimOut.Name(), cleanup, nil
 }
 
-// trimRemoveRange removes audio between [removeStart, removeEnd].
-// Inputs: ctx, inputPath, removeStart, removeEnd, logger.
-// Outputs: new input path, cleanup func, error.
-// Example usage:
-//
-//	newPath, cleanup, err := u.trimRemoveRange(ctx, inputPath, 5*time.Second, 10*time.Second, logger)
-//
-// Notes: Concatenates pre + post segments.
-func (u *Manager) trimRemoveRange(ctx context.Context, inputPath string, removeStart time.Duration, removeEnd time.Duration, logger log.FieldLogger) (string, func(), error) {
-	if removeEnd <= removeStart {
-		return inputPath, func() {}, nil
-	}
-	inputDur := resultDurationOrZero(ctx, inputPath, logger)
-	if inputDur <= 0 {
-		return inputPath, func() {}, nil
-	}
-	if removeStart < 0 {
-		removeStart = 0
-	}
-	if removeEnd > inputDur {
-		removeEnd = inputDur
-	}
-
-	preDur := removeStart
-	postStart := removeEnd
-
-	prePath, preCleanup, err := u.trimKeepRange(ctx, inputPath, 0, preDur, logger)
-	if err != nil {
-		return inputPath, func() {}, err
-	}
-	postPath, postCleanup, err := u.trimKeepRange(ctx, inputPath, postStart, inputDur, logger)
-	if err != nil {
-		preCleanup()
-		return inputPath, func() {}, err
-	}
-
-	concatOut, err := os.CreateTemp("", "podsync-trim-concat-*.mp3")
-	if err != nil {
-		preCleanup()
-		postCleanup()
-		return inputPath, func() {}, fmt.Errorf("create concat output: %w", err)
-	}
-	_ = concatOut.Close()
-	_ = os.Remove(concatOut.Name())
-
-	listFile, err := os.CreateTemp("", "podsync-trim-list-*.txt")
-	if err != nil {
-		preCleanup()
-		postCleanup()
-		return inputPath, func() {}, fmt.Errorf("create concat list: %w", err)
-	}
-	_, _ = listFile.WriteString(fmt.Sprintf("file '%s'\nfile '%s'\n", prePath, postPath))
-	_ = listFile.Close()
-
-	cmd := execCommandContext(ctx, "ffmpeg",
-		"-y",
-		"-v", "error",
-		"-nostdin",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", listFile.Name(),
-		"-c", "copy",
-		concatOut.Name(),
-	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		logger.WithField("ffmpeg_stderr", string(output)).Error("[trim] ffmpeg concat error")
-		preCleanup()
-		postCleanup()
-		_ = os.Remove(listFile.Name())
-		return inputPath, func() {}, fmt.Errorf("concat failed: %w", err)
-	}
-	info, err := os.Stat(concatOut.Name())
-	if err != nil || info.Size() <= 0 {
-		logger.Error("[trim] ERROR: concat output empty")
-		preCleanup()
-		postCleanup()
-		_ = os.Remove(listFile.Name())
-		_ = os.Remove(concatOut.Name())
-		return inputPath, func() {}, nil
-	}
-	cleanup := func() {
-		preCleanup()
-		postCleanup()
-		_ = os.Remove(listFile.Name())
-		_ = os.Remove(concatOut.Name())
-	}
-	logger.WithFields(log.Fields{"output": concatOut.Name(), "output_bytes": info.Size()}).Info("[trim] remove-segment completed")
-	return concatOut.Name(), cleanup, nil
-}
-
 // trimConcatRanges trims each keep range and concatenates them.
 // Inputs: ctx, inputPath, keepRanges, logger.
 // Outputs: new input path, cleanup func, error.
@@ -306,7 +176,7 @@ func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRa
 		return inputPath, func() {}, fmt.Errorf("create concat list: %w", err)
 	}
 	for _, segment := range segments {
-		_, _ = listFile.WriteString(fmt.Sprintf("file '%s'\n", segment))
+		_, _ = fmt.Fprintf(listFile, "file '%s'\n", segment)
 	}
 	_ = listFile.Close()
 
