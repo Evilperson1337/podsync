@@ -91,6 +91,7 @@ type Custom struct {
 	OwnerName       string        `toml:"ownerName"`
 	OwnerEmail      string        `toml:"ownerEmail"`
 	Link            string        `toml:"link"`
+	RSSMetadataURL  string        `toml:"rss_metadata_url"`
 }
 
 type Cleanup struct {

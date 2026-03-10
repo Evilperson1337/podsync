@@ -19,6 +19,7 @@ import (
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/fs"
 	"github.com/mxpv/podsync/pkg/model"
+	"github.com/mxpv/podsync/pkg/overlay"
 	"github.com/mxpv/podsync/pkg/ytdl"
 )
 
@@ -37,6 +38,7 @@ type Manager struct {
 	feeds      map[string]*feed.Config
 	keys       map[model.Provider]feed.KeyProvider
 	sigDir     string
+	overlay    *overlay.Manager
 }
 
 func NewUpdater(
@@ -66,6 +68,7 @@ func NewUpdater(
 		feeds:      feeds,
 		keys:       keys,
 		sigDir:     sigDir,
+		overlay:    overlay.NewDefaultManager(nil),
 	}, nil
 }
 
@@ -136,6 +139,10 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 
 	log.Debugf("received %d episode(s) for %q", len(result.Episodes), result.Title)
 
+	if err := u.overlay.Apply(ctx, feedConfig, result); err != nil {
+		return err
+	}
+
 	episodeSet := make(map[string]struct{})
 	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
 		if episode.Status != model.EpisodeDownloaded && episode.Status != model.EpisodeCleaned {
@@ -150,7 +157,7 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 		return err
 	}
 
-	if err := u.updateEpisodeDurations(feedConfig.ID, result.Episodes); err != nil {
+	if err := u.syncEpisodeMetadata(feedConfig.ID, result.Episodes); err != nil {
 		return err
 	}
 
@@ -171,16 +178,38 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 	return nil
 }
 
-func (u *Manager) updateEpisodeDurations(feedID string, episodes []*model.Episode) error {
+func (u *Manager) syncEpisodeMetadata(feedID string, episodes []*model.Episode) error {
 	for _, episode := range episodes {
-		if episode == nil || episode.ID == "" || episode.Duration <= 0 {
+		if episode == nil || episode.ID == "" {
 			continue
 		}
 		err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
-			if existing.Duration > 0 {
-				return nil
+			retroactiveOverlay := existing.MetadataSource != episode.MetadataSource && episode.MetadataSource == "rss"
+
+			existing.Title = episode.Title
+			existing.Description = episode.Description
+			existing.Thumbnail = episode.Thumbnail
+			existing.VideoURL = episode.VideoURL
+			existing.Link = episode.Link
+			existing.Author = episode.Author
+			existing.Explicit = episode.Explicit
+			existing.Order = episode.Order
+			existing.OrderSource = episode.OrderSource
+			existing.MetadataSource = episode.MetadataSource
+			if !episode.PubDate.IsZero() {
+				existing.PubDate = episode.PubDate
 			}
-			existing.Duration = episode.Duration
+			if existing.Duration <= 0 && episode.Duration > 0 {
+				existing.Duration = episode.Duration
+			}
+
+			if retroactiveOverlay {
+				log.WithFields(log.Fields{
+					"feed_id":    feedID,
+					"episode_id": episode.ID,
+					"overlay":    episode.MetadataSource,
+				}).Info("retroactive metadata update applied to existing episode")
+			}
 			return nil
 		})
 		if err != nil {

@@ -53,7 +53,8 @@ timeout = 15
   author = "Mrs. Smith (mrs@smith.org)"
   ownerName = "Mrs. Smith"
   ownerEmail = "mrs@smith.org"
-`
+  rss_metadata_url = "https://example.com/metadata.xml"
+ `
 	path := setup(t, file)
 	defer os.Remove(path)
 
@@ -97,6 +98,7 @@ timeout = 15
 	assert.EqualValues(t, "Mrs. Smith (mrs@smith.org)", feed.Custom.Author)
 	assert.EqualValues(t, "Mrs. Smith", feed.Custom.OwnerName)
 	assert.EqualValues(t, "mrs@smith.org", feed.Custom.OwnerEmail)
+	assert.EqualValues(t, "https://example.com/metadata.xml", feed.Custom.RSSMetadataURL)
 
 	assert.EqualValues(t, feed.Custom.Subcategories, []string{"1", "2"})
 
@@ -153,6 +155,26 @@ data_dir = "/data"
 	assert.EqualValues(t, feed.Quality, "high")
 	assert.EqualValues(t, feed.Custom.CoverArtQuality, "high")
 	assert.EqualValues(t, feed.Format, "video")
+}
+
+func TestLoadConfig_EmptyRSSMetadataURLIsIgnored(t *testing.T) {
+	const file = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.A]
+  url = "https://rumble.com/c/example/livestreams"
+  [feeds.A.custom]
+  rss_metadata_url = ""
+`
+	path := setup(t, file)
+	defer os.Remove(path)
+
+	config, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.NotNil(t, config)
+	assert.Equal(t, "", config.Feeds["A"].Custom.RSSMetadataURL)
 }
 
 func TestHttpServerListenAddress(t *testing.T) {

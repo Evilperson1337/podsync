@@ -31,16 +31,21 @@ const (
 
 type Episode struct {
 	// ID of episode
-	ID          string        `json:"id"`
-	Title       string        `json:"title"`
-	Description string        `json:"description"`
-	Thumbnail   string        `json:"thumbnail"`
-	Duration    int64         `json:"duration"`
-	VideoURL    string        `json:"video_url"`
-	PubDate     time.Time     `json:"pub_date"`
-	Size        int64         `json:"size"`
-	Order       string        `json:"order"`
-	Status      EpisodeStatus `json:"status"` // Disk status
+	ID             string        `json:"id"`
+	Title          string        `json:"title"`
+	Description    string        `json:"description"`
+	Thumbnail      string        `json:"thumbnail"`
+	Link           string        `json:"link,omitempty"`
+	Author         string        `json:"author,omitempty"`
+	Explicit       *bool         `json:"explicit,omitempty"`
+	Duration       int64         `json:"duration"`
+	VideoURL       string        `json:"video_url"`
+	PubDate        time.Time     `json:"pub_date"`
+	Size           int64         `json:"size"`
+	Order          string        `json:"order"`
+	OrderSource    string        `json:"order_source,omitempty"`
+	MetadataSource string        `json:"metadata_source,omitempty"`
+	Status         EpisodeStatus `json:"status"` // Disk status
 }
 
 type Feed struct {

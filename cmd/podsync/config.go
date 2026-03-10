@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -124,6 +125,18 @@ func (c *Config) validate() error {
 	for id, f := range c.Feeds {
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
+		}
+
+		if rssURL := strings.TrimSpace(f.Custom.RSSMetadataURL); rssURL != "" {
+			parsed, err := url.ParseRequestURI(rssURL)
+			if err != nil {
+				result = multierror.Append(result, errors.Wrapf(err, "invalid rss_metadata_url for %q", id))
+				continue
+			}
+
+			if parsed.Scheme != "http" && parsed.Scheme != "https" {
+				result = multierror.Append(result, errors.Errorf("rss_metadata_url for %q must use http or https", id))
+			}
 		}
 	}
 

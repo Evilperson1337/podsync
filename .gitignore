@@ -38,3 +38,4 @@ config.toml
 data
 
 .claude/settings.local.json
+podsync.exe

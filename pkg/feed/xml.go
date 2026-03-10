@@ -30,6 +30,51 @@ func (p timeSlice) Swap(i, j int) {
 	p[i], p[j] = p[j], p[i]
 }
 
+func shouldUseEpisodeOrder(episodes []*model.Episode) bool {
+	for _, episode := range episodes {
+		if episode == nil {
+			continue
+		}
+		if episode.OrderSource != "" && episode.Order != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseEpisodeOrder(order string) (int, bool) {
+	value, err := strconv.Atoi(order)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func sortEpisodesForXML(episodes []*model.Episode) {
+	if shouldUseEpisodeOrder(episodes) {
+		sort.SliceStable(episodes, func(i, j int) bool {
+			leftOrder, leftOK := parseEpisodeOrder(episodes[i].Order)
+			rightOrder, rightOK := parseEpisodeOrder(episodes[j].Order)
+
+			switch {
+			case leftOK && rightOK && leftOrder != rightOrder:
+				return leftOrder < rightOrder
+			case leftOK != rightOK:
+				return leftOK
+			}
+
+			if !episodes[i].PubDate.Equal(episodes[j].PubDate) {
+				return episodes[i].PubDate.After(episodes[j].PubDate)
+			}
+
+			return episodes[i].ID < episodes[j].ID
+		})
+		return
+	}
+
+	sort.Sort(timeSlice(episodes))
+}
+
 func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string) (*itunes.Podcast, error) {
 	const (
 		podsyncGenerator = "Podsync generator (support us at https://github.com/mxpv/podsync)"
@@ -109,8 +154,9 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 		}
 	}
 
-	// Sort all episodes in descending order
-	sort.Sort(timeSlice(feed.Episodes))
+	// Sort episodes by overlay-provided ordering when present, otherwise keep
+	// the historical publish-date ordering.
+	sortEpisodesForXML(feed.Episodes)
 
 	for i, episode := range feed.Episodes {
 		if episode.Status != model.EpisodeDownloaded {
@@ -128,10 +174,18 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 			IOrder: strconv.Itoa(i + 1),
 		}
 
+		if episode.Link != "" {
+			item.Link = episode.Link
+		}
+
 		item.AddPubDate(&episode.PubDate)
 		item.AddSummary(episode.Description)
 		item.AddImage(episode.Thumbnail)
 		item.AddDuration(episode.Duration)
+		if episode.Author != "" {
+			item.IAuthor = episode.Author
+			item.AuthorFormatted = episode.Author
+		}
 
 		enclosureType := itunes.MP4
 		if feed.Format == model.FormatAudio {
@@ -153,7 +207,12 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 			item.Description = " "
 		}
 
-		if cfg.Custom.Explicit {
+		explicit := cfg.Custom.Explicit
+		if episode.Explicit != nil {
+			explicit = *episode.Explicit
+		}
+
+		if explicit {
 			item.IExplicit = "true"
 		} else {
 			item.IExplicit = "false"
