@@ -3,10 +3,12 @@ package fs
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -78,33 +80,23 @@ func (s *S3) Delete(ctx context.Context, name string) error {
 }
 
 func (s *S3) Create(ctx context.Context, name string, reader io.Reader) (int64, error) {
-	key := s.buildKey(name)
-	logger := log.WithField("key", key)
-
-	// Detect MIME type from the first 512 bytes and then replay them with the rest of the stream.
-	buf := make([]byte, 512)
-	n, err := io.ReadFull(reader, buf)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return 0, errors.Wrap(err, "failed to read file header for MIME detection")
-	}
-	head := buf[:n]
-	m := mimetype.Detect(head)
-	body := io.MultiReader(bytes.NewReader(head), reader)
-
-	logger.Infof("uploading file to %s", s.bucket)
-	r := &readerWithN{Reader: body}
-	_, err = s.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
-		Body:        r,
-		Bucket:      &s.bucket,
-		ContentType: aws.String(m.String()),
-		Key:         &key,
-	})
+	session, err := s.BeginPublish(ctx, name)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to upload file")
+		return 0, err
 	}
+	defer session.Abort()
+	if _, err := io.Copy(session, reader); err != nil {
+		return 0, errors.Wrap(err, "failed to stage file")
+	}
+	return session.Commit(ctx)
+}
 
-	logger.Debugf("written %d bytes", r.n)
-	return int64(r.n), nil
+func (s *S3) BeginPublish(_ctx context.Context, name string) (PublishSession, error) {
+	tmp, err := os.CreateTemp("", "podsync-s3-publish-*")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create publish staging file")
+	}
+	return &s3PublishSession{storage: s, file: tmp, name: name, tmpPath: tmp.Name()}, nil
 }
 
 func (s *S3) Size(ctx context.Context, name string) (int64, error) {
@@ -132,9 +124,91 @@ func (s *S3) buildKey(name string) string {
 	return path.Join(s.prefix, name)
 }
 
+func (s *S3) tempKey(name string) string {
+	return fmt.Sprintf("%s.tmp-%d", s.buildKey(name), time.Now().UTC().UnixNano())
+}
+
 type readerWithN struct {
 	io.Reader
 	n int
+}
+
+type s3PublishSession struct {
+	storage *S3
+	file    *os.File
+	name    string
+	tmpPath string
+	closed  bool
+}
+
+func (s *s3PublishSession) Write(p []byte) (int, error) { return s.file.Write(p) }
+
+func (s *s3PublishSession) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.file.Close()
+}
+
+func (s *s3PublishSession) Commit(ctx context.Context) (int64, error) {
+	if err := s.Close(); err != nil {
+		return 0, err
+	}
+	file, err := os.Open(s.tmpPath)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to open staged publish file")
+	}
+	defer file.Close()
+
+	key := s.storage.buildKey(s.name)
+	tempKey := s.storage.tempKey(s.name)
+	logger := log.WithFields(log.Fields{"key": key, "temp_key": tempKey})
+
+	buf := make([]byte, 512)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return 0, errors.Wrap(err, "failed to read file header for MIME detection")
+	}
+	head := buf[:n]
+	m := mimetype.Detect(head)
+	body := io.MultiReader(bytes.NewReader(head), file)
+	info, err := os.Stat(s.tmpPath)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to stat staged publish file")
+	}
+
+	logger.Infof("uploading staged file to %s", s.storage.bucket)
+	r := &readerWithN{Reader: body}
+	_, err = s.storage.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
+		Body:        r,
+		Bucket:      &s.storage.bucket,
+		ContentType: aws.String(m.String()),
+		Key:         &tempKey,
+	})
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to upload file")
+	}
+	_, err = s.storage.api.CopyObjectWithContext(ctx, &s3.CopyObjectInput{
+		Bucket:      &s.storage.bucket,
+		CopySource:  aws.String(path.Join(s.storage.bucket, tempKey)),
+		ContentType: aws.String(m.String()),
+		Key:         &key,
+	})
+	if err != nil {
+		_, _ = s.storage.api.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{Bucket: &s.storage.bucket, Key: &tempKey})
+		return 0, errors.Wrap(err, "failed to publish staged file")
+	}
+	_, _ = s.storage.api.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{Bucket: &s.storage.bucket, Key: &tempKey})
+	return info.Size(), nil
+}
+
+func (s *s3PublishSession) Abort() error {
+	_ = s.Close()
+	if err := os.Remove(s.tmpPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (r *readerWithN) Read(p []byte) (n int, err error) {

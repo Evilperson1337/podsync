@@ -448,6 +448,84 @@ data_dir = "/data"
 	})
 }
 
+func TestLoadConfig_ValidatesCustomFormatHooksAndS3Hostname(t *testing.T) {
+	t.Run("custom format requires extension and youtube-dl format", func(t *testing.T) {
+		const file = `
+[server]
+hostname = "https://podsync.example.com"
+
+[storage]
+type = "local"
+  [storage.local]
+  data_dir = "/data"
+
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  format = "custom"
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "custom_format.extension")
+		assert.Contains(t, err.Error(), "custom_format.youtube_dl_format")
+	})
+
+	t.Run("hook validation rejects empty command and unsupported shell", func(t *testing.T) {
+		const file = `
+[server]
+hostname = "https://podsync.example.com"
+
+[storage]
+type = "local"
+  [storage.local]
+  data_dir = "/data"
+
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [[feeds.A.post_episode_download]]
+  command = []
+  [[feeds.A.on_episode_download_error]]
+  command = ["echo test"]
+  shell = "nope"
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post_episode_download")
+		assert.Contains(t, err.Error(), "unsupported shell")
+	})
+
+	t.Run("s3 requires external hostname", func(t *testing.T) {
+		const file = `
+[server]
+hostname = "http://localhost:8080"
+
+[storage]
+type = "s3"
+  [storage.s3]
+  endpoint_url = "https://s3.example.com"
+  region = "us-east-1"
+  bucket = "podsync"
+
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "externally reachable")
+	})
+}
+
 func setup(t *testing.T, file string) string {
 	t.Helper()
 

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 )
 
 // LocalConfig is the storage configuration for local file system
@@ -56,39 +55,98 @@ func (l *Local) Delete(_ctx context.Context, name string) error {
 }
 
 func (l *Local) Create(_ctx context.Context, name string, reader io.Reader) (int64, error) {
-	var (
-		logger = log.WithField("name", name)
-		path   = filepath.Join(l.rootDir, name)
-	)
-
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return 0, errors.Wrapf(err, "failed to mkdir: %s", path)
-	}
-
-	logger.Infof("creating file: %s", path)
-	written, err := l.copyFile(reader, path)
+	session, err := l.BeginPublish(context.Background(), name)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to copy file")
+		return 0, err
 	}
+	defer session.Abort()
+	if _, err := io.Copy(session, reader); err != nil {
+		return 0, errors.Wrap(err, "failed to stage file")
+	}
+	return session.Commit(context.Background())
+}
 
-	logger.Debugf("written %d bytes", written)
-	return written, nil
+func (l *Local) BeginPublish(_ctx context.Context, name string) (PublishSession, error) {
+	path := filepath.Join(l.rootDir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, errors.Wrapf(err, "failed to mkdir: %s", path)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create temporary destination file")
+	}
+	return &localPublishSession{file: tmp, tmpPath: tmp.Name(), finalPath: path}, nil
 }
 
 func (l *Local) copyFile(source io.Reader, destinationPath string) (int64, error) {
-	dest, err := os.Create(destinationPath)
+	dir := filepath.Dir(destinationPath)
+	tmp, err := os.CreateTemp(dir, filepath.Base(destinationPath)+".tmp-*")
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to create destination file")
+		return 0, errors.Wrap(err, "failed to create temporary destination file")
 	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
 
-	defer dest.Close()
-
-	written, err := io.Copy(dest, source)
+	written, err := io.Copy(tmp, source)
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to copy data")
 	}
+	if err := tmp.Sync(); err != nil {
+		return 0, errors.Wrap(err, "failed to sync temporary file")
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, errors.Wrap(err, "failed to close temporary file")
+	}
+	if err := os.Rename(tmpPath, destinationPath); err != nil {
+		return 0, errors.Wrap(err, "failed to publish temporary file")
+	}
 
 	return written, nil
+}
+
+type localPublishSession struct {
+	file      *os.File
+	tmpPath   string
+	finalPath string
+	closed    bool
+}
+
+func (s *localPublishSession) Write(p []byte) (int, error) { return s.file.Write(p) }
+
+func (s *localPublishSession) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.file.Close()
+}
+
+func (s *localPublishSession) Commit(_ctx context.Context) (int64, error) {
+	if err := s.file.Sync(); err != nil {
+		return 0, errors.Wrap(err, "failed to sync temporary file")
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to stat temporary file")
+	}
+	if err := s.Close(); err != nil {
+		return 0, errors.Wrap(err, "failed to close temporary file")
+	}
+	if err := os.Rename(s.tmpPath, s.finalPath); err != nil {
+		return 0, errors.Wrap(err, "failed to publish temporary file")
+	}
+	return info.Size(), nil
+}
+
+func (s *localPublishSession) Abort() error {
+	_ = s.Close()
+	if err := os.Remove(s.tmpPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (l *Local) Size(_ctx context.Context, name string) (int64, error) {

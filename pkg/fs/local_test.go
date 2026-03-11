@@ -101,3 +101,30 @@ func TestLocal_copyFile(t *testing.T) {
 	assert.NoError(t, err)
 	assert.EqualValues(t, 3, stat.Size())
 }
+
+func TestLocalBeginPublishCommitAndAbort(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "")
+	assert.NoError(t, err)
+	stor, err := NewLocal(tmpDir, false)
+	assert.NoError(t, err)
+
+	session, err := stor.BeginPublish(testCtx, "1/test")
+	assert.NoError(t, err)
+	_, err = session.Write([]byte("abc"))
+	assert.NoError(t, err)
+	size, err := session.Commit(testCtx)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 3, size)
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "1", "test"))
+	assert.NoError(t, err)
+	assert.Equal(t, "abc", string(data))
+
+	session, err = stor.BeginPublish(testCtx, "1/abort")
+	assert.NoError(t, err)
+	_, err = session.Write([]byte("abc"))
+	assert.NoError(t, err)
+	assert.NoError(t, session.Abort())
+	_, err = os.Stat(filepath.Join(tmpDir, "1", "abort"))
+	assert.True(t, os.IsNotExist(err))
+}

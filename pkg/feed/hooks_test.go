@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,7 +78,7 @@ func TestExecuteHook_CornerCases(t *testing.T) {
 		{
 			name: "successful command",
 			hook: &ExecHook{
-				Command: []string{"echo", "test"},
+				Command: []string{os.Args[0], "-test.run=TestHookHelperProcess", "--", "stdout:test"},
 			},
 			env:         []string{"TEST=value"},
 			expectError: false,
@@ -86,9 +87,7 @@ func TestExecuteHook_CornerCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if runtime.GOOS == "windows" && tt.name == "successful command" {
-				t.Skip("requires echo executable")
-			}
+			t.Setenv("GO_WANT_HOOK_HELPER_PROCESS", "1")
 			err := tt.hook.Invoke(tt.env)
 
 			if tt.expectError {
@@ -101,6 +100,49 @@ func TestExecuteHook_CornerCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecuteHook_DirectInvocationCrossPlatform(t *testing.T) {
+	tempDir := t.TempDir()
+	tempFile := filepath.Join(tempDir, "env_output.txt")
+	hook := &ExecHook{
+		Command: []string{os.Args[0], "-test.run=TestHookHelperProcess", "--", tempFile},
+		Timeout: 5,
+	}
+
+	t.Setenv("GO_WANT_HOOK_HELPER_PROCESS", "1")
+	require.NoError(t, hook.Invoke([]string{"TEST_VAR=test-value"}))
+
+	content, err := os.ReadFile(tempFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "test-value")
+}
+
+func TestHookHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HOOK_HELPER_PROCESS") != "1" {
+		return
+	}
+	args := os.Args
+	sep := -1
+	for i, arg := range args {
+		if arg == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep == -1 || sep+1 >= len(args) {
+		os.Exit(2)
+	}
+	target := args[sep+1]
+	if strings.HasPrefix(target, "stdout:") {
+		fmt.Fprint(os.Stdout, strings.TrimPrefix(target, "stdout:"))
+		os.Exit(0)
+	}
+	if err := os.WriteFile(target, []byte(os.Getenv("TEST_VAR")), 0644); err != nil {
+		fmt.Fprint(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func TestExecuteHook_CurlWebhook(t *testing.T) {

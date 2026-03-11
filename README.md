@@ -23,6 +23,8 @@ any device in podcast client.
 - Supports feeds configuration: video/audio, high/low quality, max video height, etc.
 - mp3 encoding
 - Update scheduler supports cron expressions
+- Concurrent feed updates with per-feed deduplication and bounded execution.
+- Provider-scoped execution limiting for expensive integrations such as Rumble.
 - Episodes filtering (match by title, duration).
 - Feeds customizations (custom artwork, category, language, etc).
 - OPML export.
@@ -39,6 +41,8 @@ any device in podcast client.
 If you're running the CLI as binary (e.g. not via Docker), you need to make sure that dependencies are available on
 your system. Currently, Podsync depends on `yt-dlp` ,  `ffmpeg`, and `go`.
 
+If you enable audio-signature trimming or SponsorBlock-based media processing, `ffprobe` must also be available on `PATH`.
+
 On Mac you can install those with `brew`:
 ```
 brew install yt-dlp ffmpeg go
@@ -52,6 +56,8 @@ brew install yt-dlp ffmpeg go
 - [Schedule updates with cron](./docs/cron.md)
 - [Audio signature detection](./docs/audio_signature_detection.md)
 - [Audio signature examples (Windows)](./docs/audio_signature_examples.md)
+- [Runtime architecture](./docs/runtime_architecture.md)
+- [Observability and operations](./docs/observability.md)
 
 ## 🌙 Nightly builds
 
@@ -111,6 +117,43 @@ hostname = "https://my.test.host:4443"
 ```
 
 Server will be accessible from `http://localhost:8080`, but episode links will point to `https://my.test.host:4443/ID1/...`
+
+### Update execution model
+
+Podsync now runs feed updates with bounded concurrency. Different feeds may run in parallel, while the same feed is deduplicated if it is already queued or in-flight. Runtime queue and active-update counters are exported through [`/debug/vars`](services/web/server.go) when debug endpoints are enabled.
+
+For providers with stricter operational characteristics, Podsync can also apply provider-scoped execution limits. The current runtime limits Rumble feed execution more conservatively than the general worker pool so scraping-heavy jobs do not overwhelm the system.
+
+Each scheduled feed run also carries a durable `execution_id` through the scheduler and updater logs, making it easier to trace one feed run end-to-end.
+
+### Episode lifecycle and failures
+
+Episodes now move through richer persisted states such as `planned`, `downloading`, `processing`, `stored`, and `published`. Failures persist retry metadata including last error, timestamp, retry count, and failure category. The [`/health`](services/web/server.go) endpoint reports recent failures by category.
+
+If Podsync encounters interrupted work on startup or before a new run, incomplete transient states are reconciled back into explicit retryable error state so operators can reason about recovery more directly.
+
+### Hook execution
+
+Hook commands are now platform-aware. Multi-argument commands execute directly. Single-string commands can use explicit shell selection with `shell = "cmd"`, `shell = "powershell"`, `shell = "pwsh"`, or `shell = "sh"`. Shell-like single-string commands without an explicit shell use the platform default.
+
+### Signature configuration
+
+Optional signature trimming root can now be configured explicitly:
+
+```toml
+[signatures]
+root_dir = "/app/data"
+```
+
+When signature-related features are enabled, Podsync validates `ffmpeg` and `ffprobe` availability during startup.
+
+### Storage publication semantics
+
+Local storage writes are now staged into sibling temporary files and atomically renamed into place. S3 publication uses a staged upload followed by publish copy, making backend-specific publication behavior explicit and reducing partially visible output risk.
+
+Publication activity is also persisted through summary metadata so XML/OPML build counts and last publication timestamps survive restarts.
+
+Podsync now also uses an explicit staged publish helper above [`fs.Storage`](pkg/fs/storage.go) for media and publication artifacts. Content is staged, minimum-size validated where appropriate, and only then committed to the underlying backend.
 
 ### 🌍 Environment Variables
 

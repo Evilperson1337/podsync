@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title></title>
+    <link></link>
+    <description></description>
+    <category>TV &amp; Film</category>
+    <generator>Podsync generator (support us at https://github.com/mxpv/podsync)</generator>
+    <language>en-us</language>
+    <lastBuildDate>__LASTBUILD__</lastBuildDate>
+    <pubDate>__PUBDATE__</pubDate>
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:category text="TV &amp; Film"></itunes:category>
+    <item>
+      <guid>1</guid>
+      <title><![CDATA[NYC ISIS Attack Proves Definitively - Islam & America are Incompatible]]></title>
+      <link>https://podsync.domain.com/crowder/1.mp3</link>
+      <description><![CDATA[Democrat Senate candidate James Talarico was pitched as the moderate option.]]></description>
+      <pubDate>__PUBDATE__</pubDate>
+      <enclosure url="https://podsync.domain.com/crowder/1.mp3" length="35263725" type="audio/mpeg"></enclosure>
+      <itunes:summary><![CDATA[Democrat Senate candidate James Talarico was pitched as the moderate option.]]></itunes:summary>
+      <itunes:duration>01:01:52</itunes:duration>
+      <itunes:explicit>false</itunes:explicit>
+      <itunes:order>1</itunes:order>
+      <itunes:season>2026</itunes:season>
+      <itunes:episode>44</itunes:episode>
+      <itunes:episodeType>full</itunes:episodeType>
+    </item>
+  </channel>
+</rss>

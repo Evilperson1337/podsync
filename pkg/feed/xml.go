@@ -1,11 +1,9 @@
 package feed
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,7 +162,7 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 	sortEpisodesForXML(feed.Episodes)
 
 	for i, episode := range feed.Episodes {
-		if episode.Status != model.EpisodeDownloaded {
+		if !model.IsEpisodePublishable(episode.Status) {
 			// Skip episodes that are not yet downloaded or have been removed
 			continue
 		}
@@ -176,10 +174,6 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 			Description: episode.Description,
 			// Some app prefer 1-based order
 			IOrder: strconv.Itoa(i + 1),
-		}
-
-		if episode.Subtitle != "" {
-			item.ISubtitle = episode.Subtitle
 		}
 
 		if episode.Link != "" {
@@ -206,12 +200,6 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 				"source":     "episode.Title",
 				"target":     "item.Title",
 				"value":      item.Title,
-			}).Debug("[metadata] Wrote normalized metadata to XML item")
-			logger.WithFields(log.Fields{
-				"episode_id": episode.ID,
-				"source":     "episode.Subtitle",
-				"target":     "item.ISubtitle",
-				"value":      item.ISubtitle,
 			}).Debug("[metadata] Wrote normalized metadata to XML item")
 			logger.WithFields(log.Fields{
 				"episode_id": episode.ID,
@@ -300,210 +288,179 @@ func RenderXML(podcast *itunes.Podcast, episodes []*model.Episode) (string, erro
 		return "", errors.New("podcast is nil")
 	}
 
-	xmlText := podcast.String()
-	logger := log.WithField("component", "xml_render")
+	doc := buildRSSDocument(podcast, episodes)
+	data, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", errors.Wrap(err, "failed to marshal rss")
+	}
+	return xml.Header + string(data), nil
+}
 
+type rssDocument struct {
+	XMLName      xml.Name   `xml:"rss"`
+	Version      string     `xml:"version,attr"`
+	XmlnsAtom    string     `xml:"xmlns:atom,attr,omitempty"`
+	XmlnsContent string     `xml:"xmlns:content,attr,omitempty"`
+	XmlnsItunes  string     `xml:"xmlns:itunes,attr,omitempty"`
+	Channel      rssChannel `xml:"channel"`
+}
+
+type rssChannel struct {
+	Title         string              `xml:"title"`
+	Link          string              `xml:"link"`
+	Description   string              `xml:"description"`
+	Category      string              `xml:"category,omitempty"`
+	Cloud         string              `xml:"cloud,omitempty"`
+	Copyright     string              `xml:"copyright,omitempty"`
+	Docs          string              `xml:"docs,omitempty"`
+	Generator     string              `xml:"generator,omitempty"`
+	Language      string              `xml:"language,omitempty"`
+	LastBuildDate string              `xml:"lastBuildDate,omitempty"`
+	PubDate       string              `xml:"pubDate,omitempty"`
+	Rating        string              `xml:"rating,omitempty"`
+	SkipHours     string              `xml:"skipHours,omitempty"`
+	SkipDays      string              `xml:"skipDays,omitempty"`
+	TTL           int                 `xml:"ttl,omitempty"`
+	WebMaster     string              `xml:"webMaster,omitempty"`
+	Image         *itunes.Image       `xml:"image,omitempty"`
+	TextInput     *itunes.TextInput   `xml:"textInput,omitempty"`
+	AtomLink      *itunes.AtomLink    `xml:"atom:link,omitempty"`
+	IAuthor       string              `xml:"itunes:author,omitempty"`
+	ISummary      *itunes.ISummary    `xml:"itunes:summary,omitempty"`
+	IBlock        string              `xml:"itunes:block,omitempty"`
+	IImage        *itunes.IImage      `xml:"itunes:image,omitempty"`
+	IDuration     string              `xml:"itunes:duration,omitempty"`
+	IExplicit     string              `xml:"itunes:explicit,omitempty"`
+	IComplete     string              `xml:"itunes:complete,omitempty"`
+	INewFeedURL   string              `xml:"itunes:new-feed-url,omitempty"`
+	IOwner        *itunes.Author      `xml:"itunes:owner,omitempty"`
+	ICategories   []*itunes.ICategory `xml:"itunes:category,omitempty"`
+	Items         []rssItem           `xml:"item"`
+}
+
+type rssItem struct {
+	GUID               string            `xml:"guid"`
+	Title              *cdataNode        `xml:"title,omitempty"`
+	Link               string            `xml:"link,omitempty"`
+	Description        *cdataNode        `xml:"description,omitempty"`
+	AuthorFormatted    string            `xml:"author,omitempty"`
+	Category           string            `xml:"category,omitempty"`
+	Comments           string            `xml:"comments,omitempty"`
+	Source             string            `xml:"source,omitempty"`
+	PubDateFormatted   string            `xml:"pubDate,omitempty"`
+	Enclosure          *itunes.Enclosure `xml:"enclosure,omitempty"`
+	IAuthor            string            `xml:"itunes:author,omitempty"`
+	ISummary           *itunes.ISummary  `xml:"itunes:summary,omitempty"`
+	IImage             *itunes.IImage    `xml:"itunes:image,omitempty"`
+	IDuration          string            `xml:"itunes:duration,omitempty"`
+	IExplicit          string            `xml:"itunes:explicit,omitempty"`
+	IIsClosedCaptioned string            `xml:"itunes:isClosedCaptioned,omitempty"`
+	IOrder             string            `xml:"itunes:order,omitempty"`
+	ISeason            int               `xml:"itunes:season,omitempty"`
+	IEpisode           int               `xml:"itunes:episode,omitempty"`
+	IEpisodeType       string            `xml:"itunes:episodeType,omitempty"`
+}
+
+type cdataNode struct {
+	Value string
+}
+
+func (c *cdataNode) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if c == nil {
+		return nil
+	}
+	type cdataElement struct {
+		Inner string `xml:",innerxml"`
+	}
+	inner := "<![CDATA[" + strings.ReplaceAll(c.Value, "]]>", "]]]]><![CDATA[>") + "]]>"
+	return e.EncodeElement(cdataElement{Inner: inner}, start)
+}
+
+func buildRSSDocument(podcast *itunes.Podcast, episodes []*model.Episode) rssDocument {
+	doc := rssDocument{
+		Version:      "2.0",
+		XmlnsAtom:    "http://www.w3.org/2005/Atom",
+		XmlnsContent: "http://purl.org/rss/1.0/modules/content/",
+		XmlnsItunes:  "http://www.itunes.com/dtds/podcast-1.0.dtd",
+		Channel: rssChannel{
+			Title:         podcast.Title,
+			Link:          podcast.Link,
+			Description:   podcast.Description,
+			Category:      podcast.Category,
+			Cloud:         podcast.Cloud,
+			Copyright:     podcast.Copyright,
+			Docs:          podcast.Docs,
+			Generator:     podcast.Generator,
+			Language:      podcast.Language,
+			LastBuildDate: podcast.LastBuildDate,
+			PubDate:       podcast.PubDate,
+			Rating:        podcast.Rating,
+			SkipHours:     podcast.SkipHours,
+			SkipDays:      podcast.SkipDays,
+			TTL:           podcast.TTL,
+			WebMaster:     podcast.WebMaster,
+			Image:         podcast.Image,
+			TextInput:     podcast.TextInput,
+			AtomLink:      podcast.AtomLink,
+			IAuthor:       podcast.IAuthor,
+			ISummary:      podcast.ISummary,
+			IBlock:        podcast.IBlock,
+			IImage:        podcast.IImage,
+			IDuration:     podcast.IDuration,
+			IExplicit:     podcast.IExplicit,
+			IComplete:     podcast.IComplete,
+			INewFeedURL:   podcast.INewFeedURL,
+			IOwner:        podcast.IOwner,
+			ICategories:   podcast.ICategories,
+		},
+	}
+
+	for _, item := range podcast.Items {
+		episode := findEpisodeByID(episodes, item.GUID)
+		rssItem := rssItem{
+			GUID:               item.GUID,
+			Title:              newCDATA(item.Title),
+			Link:               item.Link,
+			Description:        newCDATA(item.Description),
+			AuthorFormatted:    item.AuthorFormatted,
+			Category:           item.Category,
+			Comments:           item.Comments,
+			Source:             item.Source,
+			PubDateFormatted:   item.PubDateFormatted,
+			Enclosure:          item.Enclosure,
+			IAuthor:            item.IAuthor,
+			ISummary:           item.ISummary,
+			IImage:             item.IImage,
+			IDuration:          item.IDuration,
+			IExplicit:          item.IExplicit,
+			IIsClosedCaptioned: item.IIsClosedCaptioned,
+			IOrder:             item.IOrder,
+		}
+		if episode != nil {
+			rssItem.ISeason = episode.Season
+			rssItem.IEpisode = episode.EpisodeNumber
+			rssItem.IEpisodeType = strings.TrimSpace(episode.EpisodeType)
+		}
+		doc.Channel.Items = append(doc.Channel.Items, rssItem)
+	}
+
+	return doc
+}
+
+func newCDATA(value string) *cdataNode {
+	if value == "" {
+		return nil
+	}
+	return &cdataNode{Value: value}
+}
+
+func findEpisodeByID(episodes []*model.Episode, id string) *model.Episode {
 	for _, episode := range episodes {
-		if episode == nil || episode.Status != model.EpisodeDownloaded {
-			continue
+		if episode != nil && episode.ID == id {
+			return episode
 		}
-
-		var textUpdated bool
-		xmlText, textUpdated = rewriteItemTextFields(xmlText, episode)
-		if !textUpdated {
-			logger.WithField("episode_id", episode.ID).Warn("[metadata] Failed to rewrite normalized item text fields in XML item")
-		}
-
-		extra := buildExtendedItemMetadataXML(episode, "      ")
-		if extra == "" {
-			continue
-		}
-
-		updated, injected := injectExtendedMetadataIntoItem(xmlText, episode.ID, extra)
-		if !injected {
-			logger.WithField("episode_id", episode.ID).Warn("[metadata] Failed to inject extended RSS metadata into XML item")
-			continue
-		}
-
-		xmlText = updated
-		logger.WithFields(log.Fields{
-			"episode_id":     episode.ID,
-			"itunes_season":  episode.Season,
-			"itunes_episode": episode.EpisodeNumber,
-			"episode_type":   episode.EpisodeType,
-		}).Info("[metadata] Injected extended RSS metadata into XML item")
 	}
-
-	return xmlText, nil
-}
-
-func buildExtendedItemMetadataXML(episode *model.Episode, childIndent string) string {
-	if episode == nil {
-		return ""
-	}
-	if childIndent == "" {
-		childIndent = "      "
-	}
-
-	var b strings.Builder
-	if episode.Season > 0 {
-		b.WriteString("\n")
-		b.WriteString(childIndent)
-		b.WriteString("<itunes:season>")
-		b.WriteString(strconv.Itoa(episode.Season))
-		b.WriteString("</itunes:season>")
-	}
-	if episode.EpisodeNumber > 0 {
-		b.WriteString("\n")
-		b.WriteString(childIndent)
-		b.WriteString("<itunes:episode>")
-		b.WriteString(strconv.Itoa(episode.EpisodeNumber))
-		b.WriteString("</itunes:episode>")
-	}
-	if strings.TrimSpace(episode.EpisodeType) != "" {
-		b.WriteString("\n")
-		b.WriteString(childIndent)
-		b.WriteString("<itunes:episodeType>")
-		b.WriteString(escapeXMLText(strings.TrimSpace(episode.EpisodeType)))
-		b.WriteString("</itunes:episodeType>")
-	}
-	return b.String()
-}
-
-func injectExtendedMetadataIntoItem(xmlText, guid, extra string) (string, bool) {
-	if xmlText == "" || guid == "" || extra == "" {
-		return xmlText, false
-	}
-
-	guidTag := "<guid>" + escapeXMLText(guid) + "</guid>"
-	searchFrom := 0
-	for {
-		itemStartRel := strings.Index(xmlText[searchFrom:], "<item>")
-		if itemStartRel < 0 {
-			return xmlText, false
-		}
-		itemStart := searchFrom + itemStartRel
-		itemEndRel := strings.Index(xmlText[itemStart:], "</item>")
-		if itemEndRel < 0 {
-			return xmlText, false
-		}
-		itemEnd := itemStart + itemEndRel
-		itemXML := xmlText[itemStart:itemEnd]
-		if strings.Contains(itemXML, guidTag) {
-			trimmedEnd := itemEnd
-			for trimmedEnd > itemStart {
-				switch xmlText[trimmedEnd-1] {
-				case ' ', '\t', '\n', '\r':
-					trimmedEnd--
-				default:
-					goto trimmed
-				}
-			}
-		trimmed:
-			closingIndent := detectIndentBeforeIndex(xmlText, itemStart)
-			formattedExtra := strings.TrimRight(extra, "\r\n")
-			if closingIndent != "" {
-				formattedExtra += "\n" + closingIndent
-			}
-			return xmlText[:trimmedEnd] + formattedExtra + xmlText[itemEnd:], true
-		}
-		searchFrom = itemEnd + len("</item>")
-	}
-}
-
-func rewriteItemTextFields(xmlText string, episode *model.Episode) (string, bool) {
-	if xmlText == "" || episode == nil || episode.ID == "" {
-		return xmlText, false
-	}
-
-	itemXML, itemStart, itemEnd, ok := findItemXMLByGUID(xmlText, episode.ID)
-	if !ok {
-		return xmlText, false
-	}
-
-	updated := itemXML
-	rewrote := false
-	if episode.Title != "" {
-		updated, rewrote = replaceFirstTagValueWithCDATA(updated, "title", episode.Title)
-	}
-	if episode.Description != "" {
-		var replaced bool
-		updated, replaced = replaceFirstTagValueWithCDATA(updated, "description", episode.Description)
-		rewrote = rewrote || replaced
-	}
-	if episode.Subtitle != "" {
-		var replaced bool
-		updated, replaced = replaceFirstTagValueWithCDATA(updated, "itunes:subtitle", episode.Subtitle)
-		rewrote = rewrote || replaced
-	}
-
-	if !rewrote {
-		return xmlText, false
-	}
-
-	return xmlText[:itemStart] + updated + xmlText[itemEnd:], true
-}
-
-func findItemXMLByGUID(xmlText, guid string) (string, int, int, bool) {
-	guidTag := "<guid>" + escapeXMLText(guid) + "</guid>"
-	searchFrom := 0
-	for {
-		itemStartRel := strings.Index(xmlText[searchFrom:], "<item>")
-		if itemStartRel < 0 {
-			return "", 0, 0, false
-		}
-		itemStart := searchFrom + itemStartRel
-		itemEndRel := strings.Index(xmlText[itemStart:], "</item>")
-		if itemEndRel < 0 {
-			return "", 0, 0, false
-		}
-		itemEnd := itemStart + itemEndRel + len("</item>")
-		itemXML := xmlText[itemStart:itemEnd]
-		if strings.Contains(itemXML, guidTag) {
-			return itemXML, itemStart, itemEnd, true
-		}
-		searchFrom = itemEnd
-	}
-}
-
-func replaceFirstTagValueWithCDATA(itemXML, tagName, value string) (string, bool) {
-	openTag := "<" + tagName + ">"
-	closeTag := "</" + tagName + ">"
-	start := strings.Index(itemXML, openTag)
-	if start < 0 {
-		return itemXML, false
-	}
-	valueStart := start + len(openTag)
-	endRel := strings.Index(itemXML[valueStart:], closeTag)
-	if endRel < 0 {
-		return itemXML, false
-	}
-	valueEnd := valueStart + endRel
-	replacement := openTag + wrapCDATA(value) + closeTag
-	return itemXML[:start] + replacement + itemXML[valueEnd+len(closeTag):], true
-}
-
-func wrapCDATA(value string) string {
-	return "<![CDATA[" + strings.ReplaceAll(value, "]]>", "]]]]><![CDATA[>") + "]]>"
-}
-
-var trailingIndentRegexp = regexp.MustCompile(`\n([ \t]*)$`)
-
-func detectIndentBeforeIndex(value string, index int) string {
-	if index <= 0 || index > len(value) {
-		return ""
-	}
-	match := trailingIndentRegexp.FindStringSubmatch(value[:index])
-	if len(match) != 2 {
-		return ""
-	}
-	return match[1]
-}
-
-func escapeXMLText(value string) string {
-	var b bytes.Buffer
-	_ = xml.EscapeText(&b, []byte(value))
-	return b.String()
+	return nil
 }
 
 func formatDurationHHMMSS(total int64) string {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"strings"
 	"time"
 )
 
@@ -26,6 +28,10 @@ type ExecHook struct {
 	// For single commands, use shell parsing: ["echo hello"]
 	// For multiple args, pass directly: ["curl", "-X", "POST", "url"]
 	Command []string `toml:"command"`
+
+	// Shell enables explicit shell execution for single-string commands.
+	// Supported values: "", "sh", "cmd", "powershell", "pwsh", "none".
+	Shell string `toml:"shell"`
 
 	// Timeout in seconds for command execution.
 	// If 0 or unset, defaults to 60 seconds.
@@ -60,14 +66,9 @@ func (h *ExecHook) Invoke(env []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	// Create command with context
-	var cmd *exec.Cmd
-	if len(h.Command) == 1 {
-		// Single command, use shell to parse
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", h.Command[0])
-	} else {
-		// Multiple arguments, use directly
-		cmd = exec.CommandContext(ctx, h.Command[0], h.Command[1:]...)
+	cmd, err := h.buildCommand(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Set up environment variables
@@ -82,4 +83,58 @@ func (h *ExecHook) Invoke(env []string) error {
 	}
 
 	return nil
+}
+
+func (h *ExecHook) buildCommand(ctx context.Context) (*exec.Cmd, error) {
+	shell := strings.ToLower(strings.TrimSpace(h.Shell))
+	if shell == "none" {
+		shell = ""
+	}
+
+	if len(h.Command) > 1 {
+		if shell != "" {
+			return nil, fmt.Errorf("hook shell %q cannot be used with multi-argument direct command", h.Shell)
+		}
+		return exec.CommandContext(ctx, h.Command[0], h.Command[1:]...), nil
+	}
+
+	command := strings.TrimSpace(h.Command[0])
+	if command == "" {
+		return nil, fmt.Errorf("hook command is empty")
+	}
+
+	if shell == "" && !looksLikeShellCommand(command) {
+		return exec.CommandContext(ctx, command), nil
+	}
+
+	name, args, err := shellCommand(shell, command)
+	if err != nil {
+		return nil, err
+	}
+	return exec.CommandContext(ctx, name, args...), nil
+}
+
+func looksLikeShellCommand(command string) bool {
+	return strings.ContainsAny(command, "|&;<>()$`\"'*!?[]{}=") || strings.Contains(command, " ") || strings.Contains(command, "\t")
+}
+
+func shellCommand(shell, command string) (string, []string, error) {
+	switch shell {
+	case "", "sh":
+		if runtime.GOOS == "windows" {
+			if shell == "sh" {
+				return "", nil, fmt.Errorf("hook shell %q is not supported on %s", shell, runtime.GOOS)
+			}
+			return "cmd.exe", []string{"/C", command}, nil
+		}
+		return "/bin/sh", []string{"-c", command}, nil
+	case "cmd":
+		return "cmd.exe", []string{"/C", command}, nil
+	case "powershell":
+		return "powershell.exe", []string{"-NoProfile", "-NonInteractive", "-Command", command}, nil
+	case "pwsh":
+		return "pwsh", []string{"-NoProfile", "-NonInteractive", "-Command", command}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported hook shell %q", shell)
+	}
 }

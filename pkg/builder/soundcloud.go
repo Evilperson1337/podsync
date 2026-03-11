@@ -22,15 +22,7 @@ func (s *SoundCloudBuilder) Build(_ctx context.Context, cfg *feed.Config) (*mode
 		return nil, err
 	}
 
-	_feed := &model.Feed{
-		ItemID:    info.ItemID,
-		Provider:  info.Provider,
-		LinkType:  info.LinkType,
-		Format:    cfg.Format,
-		Quality:   cfg.Quality,
-		PageSize:  cfg.PageSize,
-		UpdatedAt: time.Now().UTC(),
-	}
+	_feed := newFeedModel(info, cfg)
 
 	if info.LinkType == model.TypePlaylist {
 		if soundcloudapi.IsPlaylistURL(cfg.URL) {
@@ -53,6 +45,10 @@ func (s *SoundCloudBuilder) Build(_ctx context.Context, cfg *feed.Config) (*mode
 			var added = 0
 			for _, track := range scplaylist.Tracks {
 				pubDate, _ := time.Parse(time.RFC3339, track.CreatedAt)
+				thumbnail := track.ArtworkURL
+				if thumbnail == "" {
+					thumbnail = scplaylist.ArtworkURL
+				}
 				var (
 					videoID   = strconv.FormatInt(track.ID, 10)
 					duration  = track.DurationMS / 1000
@@ -68,7 +64,7 @@ func (s *SoundCloudBuilder) Build(_ctx context.Context, cfg *feed.Config) (*mode
 					Size:        trackSize,
 					VideoURL:    mediaURL,
 					PubDate:     pubDate,
-					Thumbnail:   track.ArtworkURL,
+					Thumbnail:   thumbnail,
 					Status:      model.EpisodeNew,
 				})
 
