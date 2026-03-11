@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/mxpv/podsync/internal/sponsorblock"
 	"github.com/mxpv/podsync/pkg/audiosig"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
@@ -21,7 +24,7 @@ type matchedRule struct {
 	result audiosig.Result
 }
 
-// trimEpisodeIfSignatureFound detects and trims using a feed signature if present.
+// trimEpisodeIfSignatureFound detects configured trim segments and applies them in one trim plan.
 // Inputs:
 // - ctx: context for cancellation.
 // - feedConfig: feed configuration (uses feed ID for signature directory).
@@ -40,21 +43,10 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 	if episode == nil || feedConfig == nil {
 		return source, nil, nil
 	}
-	if u.sigDir == "" {
+	if u.sigDir == "" && !feedConfig.Custom.SponsorBlockConfig().Enabled {
 		return source, nil, nil
 	}
 	logger := log.WithFields(log.Fields{"feed_id": feedConfig.ID, "episode_id": episode.ID, "signatures_root": u.sigDir})
-	sigDir := filepath.Join(u.sigDir, feedConfig.ID, "signatures")
-	rulesPath := filepath.Join(sigDir, "rules.json")
-	rules, ok, err := ReadSignatureRules(rulesPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !ok || len(rules.Rules) == 0 {
-		logger.Info("[trim] No signature trim rules configured; skipping")
-		return source, nil, nil
-	}
-	logger.WithFields(log.Fields{"rules_path": rulesPath, "rules": len(rules.Rules)}).Info("[trim] Loaded signature trim rules")
 
 	tmpIn, err := os.CreateTemp("", "podsync-episode-*.bin")
 	if err != nil {
@@ -70,6 +62,84 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		return nil, nil, fmt.Errorf("close temp input: %w", err)
 	}
 
+	matches, inputDur, err := u.collectTrimMatches(ctx, feedConfig, episode, tmpIn.Name(), logger)
+	if err != nil {
+		_ = os.Remove(tmpIn.Name())
+		return nil, nil, err
+	}
+	if len(matches) == 0 {
+		logger.Info("[trim] No trim operations configured or matched; skipping trim")
+		file, err := os.Open(tmpIn.Name())
+		if err != nil {
+			return nil, nil, fmt.Errorf("open input: %w", err)
+		}
+		cleanup := func() {
+			_ = file.Close()
+			_ = os.Remove(tmpIn.Name())
+		}
+		return file, cleanup, nil
+	}
+
+	logger.WithField("matched_rules", len(matches)).Info("[trim] Applying planned trim rules")
+	newInput, newCleanup, err := u.applyMatchedRules(ctx, tmpIn.Name(), inputDur, matches, logger)
+	if err != nil {
+		_ = os.Remove(tmpIn.Name())
+		return nil, nil, err
+	}
+	file, err := os.Open(newInput)
+	if err != nil {
+		newCleanup()
+		_ = os.Remove(tmpIn.Name())
+		return nil, nil, fmt.Errorf("open final input: %w", err)
+	}
+	cleanup := func() {
+		_ = file.Close()
+		newCleanup()
+		_ = os.Remove(tmpIn.Name())
+	}
+	return file, cleanup, nil
+}
+
+func (u *Manager) collectTrimMatches(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, inputPath string, logger log.FieldLogger) ([]matchedRule, time.Duration, error) {
+	var (
+		matches  []matchedRule
+		inputDur time.Duration
+	)
+
+	signatureMatches, signatureDur, err := u.collectSignatureMatches(ctx, feedConfig, inputPath, logger)
+	if err != nil {
+		return nil, 0, err
+	}
+	if signatureDur > 0 {
+		inputDur = signatureDur
+	}
+	matches = append(matches, signatureMatches...)
+
+	sponsorMatches, err := u.collectSponsorBlockMatches(ctx, feedConfig, episode, logger)
+	if err != nil {
+		return nil, 0, err
+	}
+	matches = append(matches, sponsorMatches...)
+
+	return matches, inputDur, nil
+}
+
+func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.Config, inputPath string, logger log.FieldLogger) ([]matchedRule, time.Duration, error) {
+	if u.sigDir == "" {
+		return nil, 0, nil
+	}
+	sigDir := filepath.Join(u.sigDir, feedConfig.ID, "signatures")
+	rulesPath := filepath.Join(sigDir, "rules.json")
+	rules, ok, err := ReadSignatureRules(rulesPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !ok || len(rules.Rules) == 0 {
+		logger.Info("[trim] No signature trim rules configured")
+		return nil, 0, nil
+	}
+	logger.WithFields(log.Fields{"rules_path": rulesPath, "rules": len(rules.Rules)}).Info("[trim] Loaded signature trim rules")
+
 	cfg := audiosig.Config{
 		CoarseSampleRate: 4000,
 		RefineSampleRate: 11025,
@@ -82,9 +152,8 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		MinScore:         0.6,
 		MinPeakRatio:     1.2,
 	}
-	logger = logger.WithField("input", tmpIn.Name())
+	logger = logger.WithField("input", inputPath)
 	logger.Debug("[trim] Signature detection started")
-	inputPath := tmpIn.Name()
 	var detected []matchedRule
 	var inputDur time.Duration
 	for idx, rule := range rules.Rules {
@@ -102,7 +171,7 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 				}).Debug("[trim] Signature file missing; skipping rule")
 				continue
 			}
-			return nil, nil, fmt.Errorf("stat signature file: %w", err)
+			return nil, 0, fmt.Errorf("stat signature file: %w", err)
 		} else if info.Size() == 0 {
 			logger.WithFields(log.Fields{
 				"rule_index": idx,
@@ -124,7 +193,7 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		logger.Debug("[trim] Signature detection started")
 		result, err := audiosig.Detect(ctx, inputPath, sigPath, cfg)
 		if err != nil {
-			return nil, nil, fmt.Errorf("signature detect failed: %w", err)
+			return nil, 0, fmt.Errorf("signature detect failed: %w", err)
 		}
 		if !result.MatchFound {
 			logger.WithField("rule_index", idx).Debug("[trim] Signature not detected for rule")
@@ -150,34 +219,65 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		detected = append(detected, matchedRule{rule: rule, result: result})
 	}
 	if len(detected) == 0 {
-		logger.Info("[trim] No matching signatures found; skipping trim")
-		file, err := os.Open(inputPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("open input: %w", err)
-		}
-		cleanup := func() {
-			_ = file.Close()
-			_ = os.Remove(tmpIn.Name())
-		}
-		return file, cleanup, nil
+		logger.Info("[trim] No matching signature trim rules found")
 	}
+	return detected, inputDur, nil
+}
 
-	logger.WithField("matched_rules", len(detected)).Info("[trim] Applying matched trim rules")
-	newInput, newCleanup, err := u.applyMatchedRules(ctx, inputPath, inputDur, detected, logger)
+func (u *Manager) collectSponsorBlockMatches(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, logger log.FieldLogger) ([]matchedRule, error) {
+	config := feedConfig.Custom.SponsorBlockConfig()
+	if !config.Enabled {
+		return nil, nil
+	}
+	logger.WithFields(log.Fields{"feed_id": feedConfig.ID, "categories": config.Categories}).Info("SponsorBlock enabled for feed")
+	videoID := sponsorBlockVideoID(episode)
+	if videoID == "" {
+		logger.Warn("SponsorBlock video ID unavailable; skipping")
+		return nil, nil
+	}
+	client := sponsorblock.NewClient(&http.Client{Timeout: 10 * time.Second})
+	segments, err := client.SkipSegments(ctx, videoID)
 	if err != nil {
-		return nil, nil, err
+		logger.WithFields(log.Fields{"video_id": videoID}).WithError(err).Warn("SponsorBlock request failed; continuing without SponsorBlock trimming")
+		return nil, nil
 	}
-	file, err := os.Open(newInput)
-	if err != nil {
-		newCleanup()
-		return nil, nil, fmt.Errorf("open final input: %w", err)
+	logger.WithFields(log.Fields{"video_id": videoID, "segments": len(segments)}).Info("Retrieved SponsorBlock segments")
+	selected := sponsorblock.FilterSegments(segments, config.Categories)
+	logger.WithFields(log.Fields{"video_id": videoID, "categories": config.Categories, "segments": len(selected)}).Info("SponsorBlock segments selected for trimming")
+	if len(selected) == 0 {
+		return nil, nil
 	}
-	cleanup := func() {
-		_ = file.Close()
-		newCleanup()
-		_ = os.Remove(tmpIn.Name())
+	removeRanges := make([]timeRange, 0, len(selected))
+	for _, segment := range selected {
+		removeRanges = append(removeRanges, timeRange{start: segment.Start, end: segment.End})
 	}
-	return file, cleanup, nil
+	merged := mergeRanges(removeRanges)
+	result := make([]matchedRule, 0, len(merged))
+	for _, remove := range merged {
+		result = append(result, matchedRule{
+			rule:   SignatureRule{Action: "remove_segment"},
+			result: audiosig.Result{SignatureStart: remove.start, SignatureEnd: remove.end},
+		})
+	}
+	return result, nil
+}
+
+func sponsorBlockVideoID(episode *model.Episode) string {
+	if episode == nil {
+		return ""
+	}
+	if strings.TrimSpace(episode.ID) != "" {
+		return strings.TrimSpace(episode.ID)
+	}
+	if episode.VideoURL == "" {
+		return ""
+	}
+	regex := regexp.MustCompile(`/v([a-z0-9]+)`)
+	matches := regex.FindStringSubmatch(strings.ToLower(episode.VideoURL))
+	if len(matches) < 2 {
+		return ""
+	}
+	return "v" + matches[1]
 }
 
 // findSignatureFile finds the first audio signature file under /data/signatures/<feedID>.

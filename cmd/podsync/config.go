@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
@@ -123,6 +124,8 @@ func (c *Config) validate() error {
 	}
 
 	for id, f := range c.Feeds {
+		mergeFeedCustom(f)
+
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
 		}
@@ -137,6 +140,10 @@ func (c *Config) validate() error {
 			if parsed.Scheme != "http" && parsed.Scheme != "https" {
 				result = multierror.Append(result, errors.Errorf("rss_metadata_url for %q must use http or https", id))
 			}
+		}
+
+		if err := validateSponsorBlockConfig(id, f.Custom.SponsorBlockConfig()); err != nil {
+			result = multierror.Append(result, err)
 		}
 	}
 
@@ -173,6 +180,8 @@ func (c *Config) applyDefaults(configPath string) {
 	}
 
 	for _, _feed := range c.Feeds {
+		mergeFeedCustom(_feed)
+
 		if _feed.UpdatePeriod == 0 {
 			_feed.UpdatePeriod = model.DefaultUpdatePeriod
 		}
@@ -202,6 +211,94 @@ func (c *Config) applyDefaults(configPath string) {
 			_feed.Clean = c.Cleanup
 		}
 	}
+}
+
+func mergeFeedCustom(cfg *feed.Config) {
+	if cfg == nil {
+		return
+	}
+	if isCustomZero(cfg.FeedCustom) {
+		return
+	}
+	merged := cfg.Custom
+	if cfg.FeedCustom.CoverArt != "" {
+		merged.CoverArt = cfg.FeedCustom.CoverArt
+	}
+	if cfg.FeedCustom.CoverArtQuality != "" {
+		merged.CoverArtQuality = cfg.FeedCustom.CoverArtQuality
+	}
+	if cfg.FeedCustom.Category != "" {
+		merged.Category = cfg.FeedCustom.Category
+	}
+	if cfg.FeedCustom.Subcategories != nil {
+		merged.Subcategories = cfg.FeedCustom.Subcategories
+	}
+	if cfg.FeedCustom.Explicit {
+		merged.Explicit = true
+	}
+	if cfg.FeedCustom.Language != "" {
+		merged.Language = cfg.FeedCustom.Language
+	}
+	if cfg.FeedCustom.Author != "" {
+		merged.Author = cfg.FeedCustom.Author
+	}
+	if cfg.FeedCustom.Title != "" {
+		merged.Title = cfg.FeedCustom.Title
+	}
+	if cfg.FeedCustom.Description != "" {
+		merged.Description = cfg.FeedCustom.Description
+	}
+	if cfg.FeedCustom.OwnerName != "" {
+		merged.OwnerName = cfg.FeedCustom.OwnerName
+	}
+	if cfg.FeedCustom.OwnerEmail != "" {
+		merged.OwnerEmail = cfg.FeedCustom.OwnerEmail
+	}
+	if cfg.FeedCustom.Link != "" {
+		merged.Link = cfg.FeedCustom.Link
+	}
+	if cfg.FeedCustom.RSSMetadataURL != "" {
+		merged.RSSMetadataURL = cfg.FeedCustom.RSSMetadataURL
+	}
+	if cfg.FeedCustom.SponsorBlockEnabled {
+		merged.SponsorBlockEnabled = true
+	}
+	if cfg.FeedCustom.SponsorBlockCategories != nil {
+		merged.SponsorBlockCategories = cfg.FeedCustom.SponsorBlockCategories
+	}
+	if cfg.FeedCustom.SponsorBlock.Enabled || cfg.FeedCustom.SponsorBlock.Categories != nil {
+		merged.SponsorBlock = cfg.FeedCustom.SponsorBlock
+	}
+	cfg.Custom = merged
+}
+
+func isCustomZero(cfg feed.Custom) bool {
+	return cfg.CoverArt == "" &&
+		cfg.CoverArtQuality == "" &&
+		cfg.Category == "" &&
+		len(cfg.Subcategories) == 0 &&
+		!cfg.Explicit &&
+		cfg.Language == "" &&
+		cfg.Author == "" &&
+		cfg.Title == "" &&
+		cfg.Description == "" &&
+		cfg.OwnerName == "" &&
+		cfg.OwnerEmail == "" &&
+		cfg.Link == "" &&
+		cfg.RSSMetadataURL == "" &&
+		!cfg.SponsorBlockEnabled &&
+		len(cfg.SponsorBlockCategories) == 0 &&
+		!cfg.SponsorBlock.Enabled &&
+		len(cfg.SponsorBlock.Categories) == 0
+}
+
+func validateSponsorBlockConfig(feedID string, cfg feed.SponsorBlock) error {
+	for _, category := range cfg.Categories {
+		if !slices.Contains(feed.ValidSponsorBlockCategories(), category) {
+			return errors.Errorf("invalid sponsorblock category %q for %q", category, feedID)
+		}
+	}
+	return nil
 }
 
 func (c *Config) applyEnv() {

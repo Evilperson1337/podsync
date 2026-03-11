@@ -36,6 +36,8 @@ type Config struct {
 	Clean *Cleanup `toml:"clean"`
 	// Custom is a list of feed customizations
 	Custom Custom `toml:"custom"`
+	// FeedCustom is an alias for Custom to support per-feed customization under feed_custom.
+	FeedCustom Custom `toml:"feed_custom"`
 	// List of additional youtube-dl arguments passed at download time
 	YouTubeDLArgs []string `toml:"youtube_dl_args"`
 	// Post episode download hooks - executed after each episode is successfully downloaded
@@ -79,19 +81,37 @@ type Filters struct {
 }
 
 type Custom struct {
-	CoverArt        string        `toml:"cover_art"`
-	CoverArtQuality model.Quality `toml:"cover_art_quality"`
-	Category        string        `toml:"category"`
-	Subcategories   []string      `toml:"subcategories"`
-	Explicit        bool          `toml:"explicit"`
-	Language        string        `toml:"lang"`
-	Author          string        `toml:"author"`
-	Title           string        `toml:"title"`
-	Description     string        `toml:"description"`
-	OwnerName       string        `toml:"ownerName"`
-	OwnerEmail      string        `toml:"ownerEmail"`
-	Link            string        `toml:"link"`
-	RSSMetadataURL  string        `toml:"rss_metadata_url"`
+	CoverArt               string        `toml:"cover_art"`
+	CoverArtQuality        model.Quality `toml:"cover_art_quality"`
+	Category               string        `toml:"category"`
+	Subcategories          []string      `toml:"subcategories"`
+	Explicit               bool          `toml:"explicit"`
+	Language               string        `toml:"lang"`
+	Author                 string        `toml:"author"`
+	Title                  string        `toml:"title"`
+	Description            string        `toml:"description"`
+	OwnerName              string        `toml:"ownerName"`
+	OwnerEmail             string        `toml:"ownerEmail"`
+	Link                   string        `toml:"link"`
+	RSSMetadataURL         string        `toml:"rss_metadata_url"`
+	SponsorBlockEnabled    bool          `toml:"sponsorBlockEnabled"`
+	SponsorBlockCategories []string      `toml:"sponsorBlockCategories"`
+	SponsorBlock           SponsorBlock  `toml:"sponsorblock"`
+}
+
+type SponsorBlock struct {
+	Enabled    bool     `toml:"enabled"`
+	Categories []string `toml:"categories"`
+}
+
+func (c Custom) SponsorBlockConfig() SponsorBlock {
+	if c.SponsorBlock.Enabled || c.SponsorBlock.Categories != nil {
+		return c.SponsorBlock
+	}
+	return SponsorBlock{
+		Enabled:    c.SponsorBlockEnabled,
+		Categories: c.SponsorBlockCategories,
+	}
 }
 
 type Cleanup struct {

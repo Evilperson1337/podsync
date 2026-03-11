@@ -174,7 +174,6 @@ func Build(_ctx context.Context, feed *model.Feed, cfg *Config, hostname string)
 			Link:        episode.VideoURL,
 			Title:       episode.Title,
 			Description: episode.Description,
-			ISubtitle:   episode.Title,
 			// Some app prefer 1-based order
 			IOrder: strconv.Itoa(i + 1),
 		}
