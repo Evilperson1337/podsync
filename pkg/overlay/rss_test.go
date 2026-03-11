@@ -2,8 +2,10 @@ package overlay
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,14 +40,18 @@ func TestRSSProviderOverlayMatchingAndPrecedence(t *testing.T) {
 	<channel>
 		<item>
 			<title>The Trump Protesting Marine Isn&#39;t Who You Think He Is</title>
-			<itunes:title>The Trump Protesting Marine Isn't Who You Think He Is</itunes:title>
+			<itunes:title>The Trump Protesting Marine Isn&#39;t Who You Think He Is &amp; Friends</itunes:title>
 			<link>https://example.com/episode-1</link>
-			<description>Short summary</description>
-			<content:encoded><![CDATA[<p>Rich description</p>]]></content:encoded>
+			<description><![CDATA[<p class="media-description media-description--first">Short summary &amp; context</p><p class="media-description media-description--more">More details</p>]]></description>
+			<content:encoded><![CDATA[<p>Rich description &amp; details</p>]]></content:encoded>
 			<pubDate>Mon, 02 Jan 2006 15:04:05 -0700</pubDate>
-			<itunes:author>Overlay Author</itunes:author>
+			<itunes:author>Overlay Author &amp; Team</itunes:author>
+			<itunes:keywords>news, politics &amp; culture</itunes:keywords>
 			<itunes:explicit>yes</itunes:explicit>
 			<itunes:duration>9999</itunes:duration>
+			<itunes:season>2026</itunes:season>
+			<itunes:episode>10</itunes:episode>
+			<itunes:episodeType>full</itunes:episodeType>
 			<enclosure url="https://example.com/rss.mp3" length="777" type="audio/mpeg" />
 		</item>
 	</channel>
@@ -61,15 +67,56 @@ func TestRSSProviderOverlayMatchingAndPrecedence(t *testing.T) {
 
 	episode := result.Episodes[0]
 	assert.Equal(t, "The Trump Protesting Marine Isn't Who You Think He Is", episode.Title)
-	assert.Equal(t, "<p>Rich description</p>", episode.Description)
+	assert.Equal(t, "The Trump Protesting Marine Isn't Who You Think He Is & Friends", episode.Subtitle)
+	assert.Equal(t, "Short summary & context", episode.Description)
+	assert.Equal(t, "Short summary & context", episode.Summary)
 	assert.Equal(t, "https://example.com/episode-1", episode.Link)
-	assert.Equal(t, "Overlay Author", episode.Author)
+	assert.Equal(t, "Overlay Author & Team", episode.Author)
+	assert.Equal(t, "news, politics & culture", episode.Keywords)
+	assert.EqualValues(t, 2026, episode.Season)
+	assert.EqualValues(t, 10, episode.EpisodeNumber)
+	assert.Equal(t, "full", episode.EpisodeType)
 	assert.NotNil(t, episode.Explicit)
 	assert.True(t, *episode.Explicit)
 	assert.EqualValues(t, 321, episode.Duration)
 	assert.Equal(t, "https://rumble.com/v123abc-title.html", episode.VideoURL)
 	assert.Equal(t, rssMetadataSource, episode.MetadataSource)
 	assert.Equal(t, rssOrderSource, episode.OrderSource)
+}
+
+func TestExtractPrimaryDescriptionText(t *testing.T) {
+	logger := log.New()
+	value := extractPrimaryDescriptionText(`<p class="media-description media-description--first">A &amp; B</p><p class="media-description media-description--more">Ignore me</p>`, logger)
+	assert.Equal(t, "A & B", value)
+}
+
+func TestRSSProviderFetchesMetadataOncePerFeedJob(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+	<item><title>Episode One</title><pubDate>Mon, 02 Jan 2006 15:04:05 -0700</pubDate></item>
+	<item><title>Episode Two</title><pubDate>Tue, 03 Jan 2006 15:04:05 -0700</pubDate></item>
+</channel></rss>`)
+	}))
+	defer server.Close()
+
+	provider := NewRSSProvider(server.Client())
+	result := &model.Feed{Episodes: []*model.Episode{
+		{ID: "one", Title: "Episode One", PubDate: time.Date(2006, 1, 2, 22, 4, 5, 0, time.UTC)},
+		{ID: "two", Title: "Episode Two", PubDate: time.Date(2006, 1, 3, 22, 4, 5, 0, time.UTC)},
+	}}
+
+	err := provider.Apply(context.Background(), &feed.Config{ID: "test", Custom: feed.Custom{RSSMetadataURL: server.URL}}, result)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, atomic.LoadInt32(&requests))
+}
+
+func TestNormalizeMetadataValueHTML(t *testing.T) {
+	logger := log.New()
+	value := normalizeMetadataValue("title", " NYC ISIS Attack Proves Definitively - Islam &amp; America are Incompatible ", logger)
+	assert.Equal(t, "NYC ISIS Attack Proves Definitively - Islam & America are Incompatible", value)
 }
 
 func TestRSSProviderFuzzyMatch(t *testing.T) {

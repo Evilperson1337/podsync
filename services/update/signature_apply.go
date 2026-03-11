@@ -27,7 +27,7 @@ func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, input
 		inputDur = resultDurationOrZero(ctx, inputPath, logger)
 	}
 	if inputDur <= 0 {
-		logger.Warn("[trim] input duration unknown; skipping")
+		logger.Warn("[trim] Input duration unknown; skipping trim")
 		return inputPath, func() {}, nil
 	}
 	keep := []timeRange{{start: 0, end: inputDur}}
@@ -53,16 +53,16 @@ func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, input
 		case "remove_segment":
 			keep = subtractRange(keep, timeRange{start: start, end: end})
 		default:
-			logger.WithField("action", rule.Action).Warn("[trim] unknown action; skipping")
+			logger.WithField("action", rule.Action).Debug("[trim] Unknown trim action; skipping")
 		}
 		if len(keep) == 0 {
-			logger.Warn("[trim] all audio removed by rules; skipping")
+			logger.Warn("[trim] All audio would be removed by trim rules; skipping")
 			return inputPath, func() {}, nil
 		}
 	}
-	logger.WithField("keep_ranges", formatRanges(keep)).Info("[trim] computed keep ranges")
+	logger.WithField("keep_ranges", formatRanges(keep)).Debug("[trim] Computed keep ranges")
 	if len(keep) == 1 && keep[0].start <= 0 && keep[0].end >= inputDur {
-		logger.Info("[trim] no effective trimming needed")
+		logger.Info("[trim] No effective trimming needed")
 		return inputPath, func() {}, nil
 	}
 	return u.trimConcatRanges(ctx, inputPath, keep, logger)
@@ -87,7 +87,7 @@ func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart
 
 	bitrateKbps, err := audiosig.FFprobeAudioBitrate(ctx, inputPath)
 	if err != nil {
-		logger.WithError(err).Warn("[trim] bitrate lookup failed; using default")
+		logger.WithError(err).Debug("[trim] Bitrate lookup failed; using default")
 		bitrateKbps = 0
 	}
 
@@ -115,19 +115,19 @@ func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart
 	args = append(args, trimOut.Name())
 	cmd := execCommandContext(ctx, "ffmpeg", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		logger.WithField("ffmpeg_stderr", string(output)).Error("[trim] ffmpeg error")
+		logger.WithField("ffmpeg_stderr", string(output)).Error("[trim] ffmpeg keep-range error")
 		return inputPath, func() {}, fmt.Errorf("trim keep failed: %w", err)
 	}
 	info, err := os.Stat(trimOut.Name())
 	if err != nil || info.Size() <= 0 {
-		logger.Error("[trim] ERROR: keep-range output empty")
+		logger.Warn("[trim] Keep-range output empty; skipping trim result")
 		_ = os.Remove(trimOut.Name())
 		return inputPath, func() {}, nil
 	}
 	cleanup := func() {
 		_ = os.Remove(trimOut.Name())
 	}
-	logger.WithFields(log.Fields{"output": trimOut.Name(), "output_bytes": info.Size()}).Info("[trim] keep-range completed")
+	logger.WithFields(log.Fields{"output_bytes": info.Size(), "range_start": keepStart, "range_end": keepEnd}).Debug("[trim] Keep-range segment created")
 	return trimOut.Name(), cleanup, nil
 }
 
@@ -152,7 +152,7 @@ func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRa
 		cleanups = append(cleanups, cleanup)
 	}
 	if len(segments) == 0 {
-		logger.Warn("[trim] no keep ranges produced output; skipping")
+		logger.Warn("[trim] No keep ranges produced output; skipping trim")
 		return inputPath, func() {}, nil
 	}
 	if len(segments) == 1 {
@@ -200,7 +200,7 @@ func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRa
 	}
 	info, err := os.Stat(concatOut.Name())
 	if err != nil || info.Size() <= 0 {
-		logger.Error("[trim] ERROR: concat output empty")
+		logger.Warn("[trim] Concat output empty; skipping trim result")
 		for _, fn := range cleanups {
 			fn()
 		}
@@ -215,7 +215,7 @@ func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRa
 		_ = os.Remove(listFile.Name())
 		_ = os.Remove(concatOut.Name())
 	}
-	logger.WithFields(log.Fields{"output": concatOut.Name(), "output_bytes": info.Size()}).Info("[trim] concat completed")
+	logger.WithFields(log.Fields{"segments": len(segments), "output_bytes": info.Size()}).Info("[trim] Trim completed")
 	return concatOut.Name(), cleanup, nil
 }
 
@@ -248,12 +248,12 @@ func resultDurationOrZero(ctx context.Context, inputPath string, logger log.Fiel
 	)
 	output, err := cmd.Output()
 	if err != nil {
-		logger.WithError(err).Warn("[trim] ffprobe duration failed")
+		logger.WithError(err).Debug("[trim] ffprobe duration failed")
 		return 0
 	}
 	seconds, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
 	if err != nil {
-		logger.WithError(err).Warn("[trim] parse duration failed")
+		logger.WithError(err).Debug("[trim] parse duration failed")
 		return 0
 	}
 	return time.Duration(seconds * float64(time.Second))

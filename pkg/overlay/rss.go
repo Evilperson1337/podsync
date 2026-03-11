@@ -3,7 +3,7 @@ package overlay
 import (
 	"context"
 	"encoding/xml"
-	"html"
+	stdhtml "html"
 	"io"
 	"math"
 	"net/http"
@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	xhtml "golang.org/x/net/html"
 	"golang.org/x/text/unicode/norm"
 
 	log "github.com/sirupsen/logrus"
@@ -41,6 +42,7 @@ type rssItem struct {
 	Link            string
 	Description     string
 	ContentEncoded  string
+	Keywords        string
 	PubDate         time.Time
 	Duration        int64
 	Explicit        *bool
@@ -78,7 +80,11 @@ func (p *RSSProvider) Name() string {
 
 func (p *RSSProvider) Apply(ctx context.Context, cfg *feed.Config, result *model.Feed) error {
 	rssURL := strings.TrimSpace(cfg.Custom.RSSMetadataURL)
-	if rssURL == "" || result == nil || len(result.Episodes) == 0 {
+	if rssURL == "" {
+		log.WithField("feed_id", cfg.ID).Info("RSS metadata URL not configured; skipping RSS metadata retrieval")
+		return nil
+	}
+	if result == nil {
 		return nil
 	}
 
@@ -87,17 +93,22 @@ func (p *RSSProvider) Apply(ctx context.Context, cfg *feed.Config, result *model
 		"url":     rssURL,
 		"overlay": "rss",
 	})
-	logger.Info("rss metadata overlay enabled")
 
 	items, err := p.fetch(ctx, rssURL)
 	if err != nil {
-		logger.WithError(err).Warn("rss metadata feed fetch failure; falling back to source metadata")
+		logger.WithError(err).Error("Failed to obtain RSS Feed Metadata from configured URL")
 		return nil
 	}
-	logger.WithField("items", len(items)).Info("rss metadata feed fetched successfully")
+	logger.WithField("items", len(items)).Info("Successfully obtained RSS Feed Metadata from configured URL")
+
+	if len(result.Episodes) == 0 {
+		logger.Info("No episodes available for RSS metadata matching in current feed job")
+		return nil
+	}
 
 	matches, matchedCount := matchEpisodes(result.Episodes, items, logger)
 	if matchedCount == 0 {
+		logger.WithField("episodes", len(result.Episodes)).Info("No RSS metadata matches found for current feed job")
 		return nil
 	}
 
@@ -124,7 +135,10 @@ func (p *RSSProvider) fetch(ctx context.Context, rssURL string) ([]*rssItem, err
 		return nil, &httpStatusError{statusCode: resp.StatusCode}
 	}
 
-	return parseRSSFeed(resp.Body)
+	return parseRSSFeed(resp.Body, log.WithFields(log.Fields{
+		"overlay": "rss",
+		"url":     rssURL,
+	}))
 }
 
 type httpStatusError struct {
@@ -135,7 +149,7 @@ func (e *httpStatusError) Error() string {
 	return "unexpected rss status: " + strconv.Itoa(e.statusCode)
 }
 
-func parseRSSFeed(reader io.Reader) ([]*rssItem, error) {
+func parseRSSFeed(reader io.Reader, logger log.FieldLogger) ([]*rssItem, error) {
 	decoder := xml.NewDecoder(reader)
 	items := make([]*rssItem, 0)
 	order := 1
@@ -154,7 +168,7 @@ func parseRSSFeed(reader io.Reader) ([]*rssItem, error) {
 			continue
 		}
 
-		item, err := parseRSSItem(decoder, start, order)
+		item, err := parseRSSItem(decoder, start, order, logger.WithField("rss_order", order))
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +186,7 @@ func parseRSSFeed(reader io.Reader) ([]*rssItem, error) {
 	return items, nil
 }
 
-func parseRSSItem(decoder *xml.Decoder, start xml.StartElement, order int) (*rssItem, error) {
+func parseRSSItem(decoder *xml.Decoder, start xml.StartElement, order int, logger log.FieldLogger) (*rssItem, error) {
 	item := &rssItem{Order: order}
 
 	for {
@@ -185,31 +199,39 @@ func parseRSSItem(decoder *xml.Decoder, start xml.StartElement, order int) (*rss
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "guid":
-				if err := decoder.DecodeElement(&item.GUID, &t); err != nil {
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
+				item.GUID = strings.TrimSpace(value)
 			case "title":
 				var value string
 				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
 				if t.Name.Space == "" {
-					item.Title = value
+					item.Title = normalizeAndLogRSSTextField("title", "rssItem.Title", value, logger)
 				} else {
-					item.ItunesTitle = value
+					item.ItunesTitle = normalizeAndLogRSSTextField("itunes:title", "rssItem.ItunesTitle", value, logger)
 				}
 			case "link":
-				if err := decoder.DecodeElement(&item.Link, &t); err != nil {
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
+				item.Link = normalizeAndLogRSSTextField("link", "rssItem.Link", value, logger)
 			case "description":
-				if err := decoder.DecodeElement(&item.Description, &t); err != nil {
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
+				item.Description = normalizeAndLogRSSTextField("description", "rssItem.Description", value, logger)
 			case "encoded":
-				if err := decoder.DecodeElement(&item.ContentEncoded, &t); err != nil {
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
+				item.ContentEncoded = normalizeAndLogRSSTextField("content:encoded", "rssItem.ContentEncoded", value, logger)
 			case "pubDate":
 				var value string
 				if err := decoder.DecodeElement(&value, &t); err != nil {
@@ -241,13 +263,23 @@ func parseRSSItem(decoder *xml.Decoder, start xml.StartElement, order int) (*rss
 				}
 				item.Episode, _ = strconv.Atoi(strings.TrimSpace(value))
 			case "episodeType":
-				if err := decoder.DecodeElement(&item.EpisodeType, &t); err != nil {
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
+				item.EpisodeType = normalizeAndLogRSSTextField("itunes:episodeType", "rssItem.EpisodeType", value, logger)
 			case "author":
-				if err := decoder.DecodeElement(&item.Author, &t); err != nil {
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
 					return nil, err
 				}
+				item.Author = normalizeAndLogRSSTextField("itunes:author", "rssItem.Author", value, logger)
+			case "keywords":
+				var value string
+				if err := decoder.DecodeElement(&value, &t); err != nil {
+					return nil, err
+				}
+				item.Keywords = normalizeAndLogRSSTextField("itunes:keywords", "rssItem.Keywords", value, logger)
 			case "image":
 				for _, attr := range t.Attr {
 					if attr.Name.Local == "href" {
@@ -344,13 +376,37 @@ func chooseCanonicalDescription(item *rssItem) string {
 	if strings.TrimSpace(item.ContentEncoded) != "" {
 		return strings.TrimSpace(item.ContentEncoded)
 	}
+	if extracted := extractPrimaryDescriptionText(item.Description, log.WithField("rss_guid", item.GUID)); extracted != "" {
+		return extracted
+	}
+	return strings.TrimSpace(item.Description)
+}
+
+func chooseRSSItemTitle(item *rssItem) string {
+	if strings.TrimSpace(item.Title) != "" {
+		return strings.TrimSpace(item.Title)
+	}
+	return strings.TrimSpace(item.ItunesTitle)
+}
+
+func chooseRSSItemSubtitle(item *rssItem) string {
+	if strings.TrimSpace(item.ItunesTitle) != "" {
+		return strings.TrimSpace(item.ItunesTitle)
+	}
+	return strings.TrimSpace(item.Title)
+}
+
+func chooseRSSItemSummary(item *rssItem) string {
+	if strings.TrimSpace(item.ContentEncoded) != "" {
+		return strings.TrimSpace(item.ContentEncoded)
+	}
 	return strings.TrimSpace(item.Description)
 }
 
 var whitespaceRegexp = regexp.MustCompile(`\s+`)
 
 func normalizeTitle(value string) string {
-	value = html.UnescapeString(strings.TrimSpace(value))
+	value = stdhtml.UnescapeString(strings.TrimSpace(value))
 	if value == "" {
 		return ""
 	}
@@ -416,7 +472,7 @@ func matchEpisodes(episodes []*model.Episode, items []*rssItem, logger log.Field
 			logger.WithFields(log.Fields{
 				"episode_id": episode.ID,
 				"title":      episode.Title,
-			}).Warn("no rss metadata match found for source item")
+			}).Info("No RSS metadata match found for video")
 			continue
 		}
 
@@ -429,9 +485,12 @@ func matchEpisodes(episodes []*model.Episode, items []*rssItem, logger log.Field
 			"rss_guid":   match.item.GUID,
 			"strategy":   match.strategy,
 			"similarity": strconv.FormatFloat(match.similarity, 'f', 3, 64),
-		}).Info("rss metadata match found for source item")
+		}).Info("RSS Metadata match found for video")
 
-		applyRSSMetadata(episode, match.item)
+		applyRSSMetadata(episode, match.item, logger.WithFields(log.Fields{
+			"episode_id": episode.ID,
+			"rss_guid":   match.item.GUID,
+		}))
 	}
 
 	return result, matched
@@ -540,29 +599,270 @@ func chooseDateMatch(episode *model.Episode, items []*rssItem, used map[*rssItem
 	return &rssMatch{item: best, strategy: "publish_date", similarity: bestScore, dateDiff: bestDiff}
 }
 
-func applyRSSMetadata(episode *model.Episode, item *rssItem) {
-	if title := strings.TrimSpace(item.canonicalTitle); title != "" {
+func applyRSSMetadata(episode *model.Episode, item *rssItem, logger log.FieldLogger) {
+	assignedTitle := episode.Title
+	if title := chooseRSSItemTitle(item); title != "" {
 		episode.Title = title
+		assignedTitle = title
+		logger.WithField("field", "title").Debug("[metadata] Assigned source field title -> episode.Title")
 	}
-	if desc := strings.TrimSpace(item.canonicalDesc); desc != "" {
-		episode.Description = desc
+	if subtitle := chooseRSSItemSubtitle(item); subtitle != "" {
+		episode.Subtitle = subtitle
+		logger.WithField("field", "itunes:title").Debug("[metadata] Assigned source field itunes:title -> episode.Subtitle")
+	}
+	assignedDescription := episode.Description
+	descriptionText := chooseRSSItemDescription(item, logger)
+	if descriptionText != "" {
+		episode.Description = descriptionText
+		assignedDescription = descriptionText
+		logger.WithField("field", "description").Debug("[metadata] Assigned source field description -> episode.Description")
+	}
+	assignedSummary := episode.Summary
+	if descriptionText != "" {
+		episode.Summary = descriptionText
+		assignedSummary = descriptionText
+		logger.WithField("field", "description").Debug("[metadata] Assigned normalized description text -> episode.Summary")
+	} else if summary := chooseRSSItemSummary(item); summary != "" {
+		normalizedSummary := normalizePlainText(summary)
+		episode.Summary = normalizedSummary
+		assignedSummary = normalizedSummary
+		logger.WithField("field", "content:encoded").Debug("[metadata] Assigned fallback source field content:encoded -> episode.Summary")
 	}
 	if item.PubDate != (time.Time{}) {
 		episode.PubDate = item.PubDate
+		logger.WithField("field", "pubDate").Debug("[metadata] Assigned source field pubDate -> episode.PubDate")
 	}
 	if strings.TrimSpace(item.Link) != "" {
 		episode.Link = strings.TrimSpace(item.Link)
+		logger.WithField("field", "link").Debug("[metadata] Assigned source field link -> episode.Link")
 	}
 	if strings.TrimSpace(item.Author) != "" {
 		episode.Author = strings.TrimSpace(item.Author)
+		logger.WithField("field", "itunes:author").Debug("[metadata] Assigned source field itunes:author -> episode.Author")
+	}
+	if strings.TrimSpace(item.Keywords) != "" {
+		episode.Keywords = strings.TrimSpace(item.Keywords)
+		logger.WithField("field", "itunes:keywords").Debug("[metadata] Assigned source field itunes:keywords -> episode.Keywords")
+	}
+	if item.Season > 0 {
+		episode.Season = item.Season
+		logger.WithField("field", "itunes:season").Debug("[metadata] Assigned source field itunes:season -> episode.Season")
+	}
+	if item.Episode > 0 {
+		episode.EpisodeNumber = item.Episode
+		logger.WithField("field", "itunes:episode").Debug("[metadata] Assigned source field itunes:episode -> episode.EpisodeNumber")
+	}
+	if strings.TrimSpace(item.EpisodeType) != "" {
+		episode.EpisodeType = strings.TrimSpace(item.EpisodeType)
+		logger.WithField("field", "itunes:episodeType").Debug("[metadata] Assigned source field itunes:episodeType -> episode.EpisodeType")
 	}
 	if item.Explicit != nil {
 		episode.Explicit = item.Explicit
+		logger.WithField("field", "itunes:explicit").Debug("[metadata] Assigned source field itunes:explicit -> episode.Explicit")
 	}
 	if strings.TrimSpace(item.Thumbnail) != "" {
 		episode.Thumbnail = strings.TrimSpace(item.Thumbnail)
+		logger.WithField("field", "itunes:image").Debug("[metadata] Assigned source field itunes:image -> episode.Thumbnail")
 	}
 	episode.MetadataSource = rssMetadataSource
+
+	logger.WithFields(log.Fields{
+		"title":         assignedTitle,
+		"pubDate":       episode.PubDate.Format(time.RFC1123Z),
+		"duration":      formatDurationHHMMSS(episode.Duration),
+		"enclosure_url": episode.VideoURL,
+		"explicit":      formatExplicitValue(episode.Explicit),
+		"season":        episode.Season,
+		"episode":       episode.EpisodeNumber,
+		"episode_type":  episode.EpisodeType,
+	}).Info("Applied RSS metadata to episode")
+	logger.WithFields(log.Fields{
+		"description": assignedDescription,
+		"summary":     assignedSummary,
+	}).Debug("[metadata] Applied normalized text fields to episode")
+}
+
+func normalizeMetadataValue(field, value string, logger log.FieldLogger) string {
+	raw := strings.TrimSpace(value)
+	normalized := stdhtml.UnescapeString(raw)
+	logger.WithFields(log.Fields{
+		"field":      field,
+		"raw":        raw,
+		"normalized": normalized,
+	}).Debug("[metadata] Normalized RSS metadata field")
+	return normalized
+}
+
+func chooseRSSItemDescription(item *rssItem, logger log.FieldLogger) string {
+	if desc := extractPrimaryDescriptionText(item.Description, logger); desc != "" {
+		return desc
+	}
+	if strings.TrimSpace(item.Description) != "" {
+		logger.WithField("source_field", "description").Debug("[metadata] Falling back to normalized RSS description text")
+		return normalizePlainText(item.Description)
+	}
+	if summary := extractPrimaryDescriptionText(item.ContentEncoded, logger); summary != "" {
+		logger.WithField("source_field", "content:encoded").Debug("[metadata] Falling back to extracted content:encoded paragraph for description")
+		return summary
+	}
+	return normalizePlainText(item.ContentEncoded)
+}
+
+func extractPrimaryDescriptionText(raw string, logger log.FieldLogger) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	logger.WithFields(log.Fields{
+		"source_field": "description",
+		"raw":          raw,
+	}).Debug("[metadata] Attempting to extract first RSS description paragraph")
+
+	nodes, err := xhtml.ParseFragment(strings.NewReader(raw), nil)
+	if err != nil {
+		logger.WithError(err).WithField("source_field", "description").Debug("[metadata] Failed to parse RSS description HTML; falling back")
+		return normalizePlainText(raw)
+	}
+
+	for _, node := range nodes {
+		if paragraph := findPrimaryDescriptionParagraph(node); paragraph != nil {
+			text := normalizePlainText(extractNodeText(paragraph))
+			logger.WithFields(log.Fields{
+				"source_field": "description",
+				"extracted":    text,
+			}).Debug("[metadata] Extracted first RSS description paragraph")
+			return text
+		}
+	}
+
+	for _, node := range nodes {
+		if paragraph := findFirstParagraph(node); paragraph != nil {
+			text := normalizePlainText(extractNodeText(paragraph))
+			logger.WithFields(log.Fields{
+				"source_field": "description",
+				"extracted":    text,
+			}).Debug("[metadata] Primary description paragraph missing; using first paragraph fallback")
+			return text
+		}
+	}
+
+	fallback := normalizePlainText(raw)
+	logger.WithFields(log.Fields{
+		"source_field": "description",
+		"extracted":    fallback,
+	}).Debug("[metadata] No paragraph tags found in RSS description; using normalized text fallback")
+	return fallback
+}
+
+func findPrimaryDescriptionParagraph(node *xhtml.Node) *xhtml.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Type == xhtml.ElementNode && node.Data == "p" && hasAllClasses(node, "media-description", "media-description--first") {
+		return node
+	}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if found := findPrimaryDescriptionParagraph(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func findFirstParagraph(node *xhtml.Node) *xhtml.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Type == xhtml.ElementNode && node.Data == "p" {
+		return node
+	}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if found := findFirstParagraph(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func hasAllClasses(node *xhtml.Node, required ...string) bool {
+	if node == nil {
+		return false
+	}
+	for _, attr := range node.Attr {
+		if attr.Key != "class" {
+			continue
+		}
+		classes := strings.Fields(attr.Val)
+		set := make(map[string]struct{}, len(classes))
+		for _, className := range classes {
+			set[className] = struct{}{}
+		}
+		for _, need := range required {
+			if _, ok := set[need]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func extractNodeText(node *xhtml.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.Type == xhtml.TextNode {
+		return node.Data
+	}
+	var parts []string
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if text := extractNodeText(child); strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func normalizePlainText(value string) string {
+	value = stdhtml.UnescapeString(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	return strings.TrimSpace(whitespaceRegexp.ReplaceAllString(value, " "))
+}
+
+func formatDurationHHMMSS(total int64) string {
+	if total <= 0 {
+		return ""
+	}
+	hours := total / 3600
+	minutes := (total % 3600) / 60
+	seconds := total % 60
+	return strconv.FormatInt(hours/10, 10) + strconv.FormatInt(hours%10, 10) + ":" +
+		strconv.FormatInt(minutes/10, 10) + strconv.FormatInt(minutes%10, 10) + ":" +
+		strconv.FormatInt(seconds/10, 10) + strconv.FormatInt(seconds%10, 10)
+}
+
+func formatExplicitValue(explicit *bool) interface{} {
+	if explicit == nil {
+		return ""
+	}
+	return *explicit
+}
+
+func normalizeAndLogRSSTextField(sourceField, targetField, value string, logger log.FieldLogger) string {
+	raw := strings.TrimSpace(value)
+	logger.WithFields(log.Fields{
+		"source_field": sourceField,
+		"raw":          raw,
+	}).Debug("[metadata] Source field extracted")
+	normalized := normalizeMetadataValue(sourceField, raw, logger)
+	logger.WithFields(log.Fields{
+		"source_field":   sourceField,
+		"internal_field": targetField,
+	}).Debug("[metadata] Assigned source field to internal metadata")
+	return normalized
 }
 
 func applyRSSOrdering(episodes []*model.Episode, matches map[string]*rssMatch, logger log.FieldLogger) {

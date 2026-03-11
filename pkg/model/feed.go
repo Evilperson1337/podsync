@@ -33,15 +33,21 @@ type Episode struct {
 	// ID of episode
 	ID             string        `json:"id"`
 	Title          string        `json:"title"`
+	Subtitle       string        `json:"subtitle,omitempty"`
 	Description    string        `json:"description"`
+	Summary        string        `json:"summary,omitempty"`
 	Thumbnail      string        `json:"thumbnail"`
 	Link           string        `json:"link,omitempty"`
 	Author         string        `json:"author,omitempty"`
+	Keywords       string        `json:"keywords,omitempty"`
 	Explicit       *bool         `json:"explicit,omitempty"`
 	Duration       int64         `json:"duration"`
 	VideoURL       string        `json:"video_url"`
 	PubDate        time.Time     `json:"pub_date"`
 	Size           int64         `json:"size"`
+	Season         int           `json:"season,omitempty"`
+	EpisodeNumber  int           `json:"episode_number,omitempty"`
+	EpisodeType    string        `json:"episode_type,omitempty"`
 	Order          string        `json:"order"`
 	OrderSource    string        `json:"order_source,omitempty"`
 	MetadataSource string        `json:"metadata_source,omitempty"`

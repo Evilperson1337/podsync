@@ -364,6 +364,12 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		if trimmedCleanup != nil {
 			defer trimmedCleanup()
 		}
+		processedDuration := episode.Duration
+		if namedReader, ok := trimmedReader.(interface{ Name() string }); ok {
+			if duration := resultDurationOrZero(ctx, namedReader.Name(), logger); duration > 0 {
+				processedDuration = int64(duration.Seconds())
+			}
+		}
 		fileSize, err := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), trimmedReader)
 		tempFile.Close()
 		if err != nil {
@@ -399,6 +405,9 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		logger.Infof("successfully downloaded file %q", episode.ID)
 		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 			episode.Size = fileSize
+			if processedDuration > 0 {
+				episode.Duration = processedDuration
+			}
 			episode.Status = model.EpisodeDownloaded
 			return nil
 		}); err != nil {
@@ -424,9 +433,13 @@ func (u *Manager) buildXML(ctx context.Context, feedConfig *feed.Config) error {
 	if err != nil {
 		return err
 	}
+	xmlText, err := feed.RenderXML(podcast, f.Episodes)
+	if err != nil {
+		return err
+	}
 
 	var (
-		reader  = bytes.NewReader([]byte(podcast.String()))
+		reader  = bytes.NewReader([]byte(xmlText))
 		xmlName = fmt.Sprintf("%s.xml", feedConfig.ID)
 	)
 

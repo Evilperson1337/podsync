@@ -44,21 +44,17 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		return source, nil, nil
 	}
 	logger := log.WithFields(log.Fields{"feed_id": feedConfig.ID, "episode_id": episode.ID, "signatures_root": u.sigDir})
-	logger.Info("[trim] start")
 	sigDir := filepath.Join(u.sigDir, feedConfig.ID, "signatures")
-	logger.WithField("signature_dir", sigDir).Info("[trim] signature lookup started")
 	rulesPath := filepath.Join(sigDir, "rules.json")
 	rules, ok, err := ReadSignatureRules(rulesPath)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !ok || len(rules.Rules) == 0 {
-		logger.Info("[trim] no rules.json; skipping")
+		logger.Info("[trim] No signature trim rules configured; skipping")
 		return source, nil, nil
 	}
-	logger.WithField("rules_path", rulesPath).Info("[trim] rules loaded")
-
-	logger.Info("[trim] rules loaded; preparing temp input")
+	logger.WithFields(log.Fields{"rules_path": rulesPath, "rules": len(rules.Rules)}).Info("[trim] Loaded signature trim rules")
 
 	tmpIn, err := os.CreateTemp("", "podsync-episode-*.bin")
 	if err != nil {
@@ -87,13 +83,13 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		MinPeakRatio:     1.2,
 	}
 	logger = logger.WithField("input", tmpIn.Name())
-	logger.Info("[trim] detection started")
+	logger.Debug("[trim] Signature detection started")
 	inputPath := tmpIn.Name()
 	var detected []matchedRule
 	var inputDur time.Duration
 	for idx, rule := range rules.Rules {
 		if rule.File == "" || rule.Action == "" {
-			logger.WithField("rule_index", idx).Warn("[trim] invalid rule; skipping")
+			logger.WithField("rule_index", idx).Debug("[trim] Invalid rule; skipping")
 			continue
 		}
 		sigPath := filepath.Join(sigDir, rule.File)
@@ -103,7 +99,7 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 					"rule_index": idx,
 					"rule_file":  rule.File,
 					"signature":  sigPath,
-				}).Warn("[trim] signature file missing; skipping rule")
+				}).Debug("[trim] Signature file missing; skipping rule")
 				continue
 			}
 			return nil, nil, fmt.Errorf("stat signature file: %w", err)
@@ -112,7 +108,7 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 				"rule_index": idx,
 				"rule_file":  rule.File,
 				"signature":  sigPath,
-			}).Warn("[trim] signature file empty; skipping rule")
+			}).Debug("[trim] Signature file empty; skipping rule")
 			continue
 		}
 		logger.WithFields(log.Fields{
@@ -122,16 +118,16 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 			"rule_pre":    rule.PreSeconds,
 			"rule_post":   rule.PostSeconds,
 			"signature":   sigPath,
-		}).Info("[trim] applying rule")
+		}).Debug("[trim] Evaluating trim rule")
 
 		logger = logger.WithField("input", inputPath)
-		logger.Info("[trim] detection started")
+		logger.Debug("[trim] Signature detection started")
 		result, err := audiosig.Detect(ctx, inputPath, sigPath, cfg)
 		if err != nil {
 			return nil, nil, fmt.Errorf("signature detect failed: %w", err)
 		}
 		if !result.MatchFound {
-			logger.Info("[trim] signature not detected; skipping rule")
+			logger.WithField("rule_index", idx).Debug("[trim] Signature not detected for rule")
 			continue
 		}
 		if inputDur == 0 {
@@ -143,11 +139,18 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 			"split_at":        result.SplitAt,
 			"confidence":      result.ConfidenceScore,
 		})
-		logger.Info("[trim] signature detected")
+		logger.WithFields(log.Fields{
+			"rule_index":      idx,
+			"rule_action":     rule.Action,
+			"signature_start": result.SignatureStart,
+			"signature_end":   result.SignatureEnd,
+			"split_at":        result.SplitAt,
+			"confidence":      result.ConfidenceScore,
+		}).Info("[trim] Signature match found")
 		detected = append(detected, matchedRule{rule: rule, result: result})
 	}
 	if len(detected) == 0 {
-		logger.Info("[trim] no matching signatures; skipping")
+		logger.Info("[trim] No matching signatures found; skipping trim")
 		file, err := os.Open(inputPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open input: %w", err)
@@ -159,7 +162,7 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 		return file, cleanup, nil
 	}
 
-	logger.Info("[trim] applying matched rules in a single pass")
+	logger.WithField("matched_rules", len(detected)).Info("[trim] Applying matched trim rules")
 	newInput, newCleanup, err := u.applyMatchedRules(ctx, inputPath, inputDur, detected, logger)
 	if err != nil {
 		return nil, nil, err
