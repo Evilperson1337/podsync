@@ -54,7 +54,10 @@ timeout = 15
   ownerName = "Mrs. Smith"
   ownerEmail = "mrs@smith.org"
   rss_metadata_url = "https://example.com/metadata.xml"
- `
+
+  sponsorBlockEnabled = true
+  sponsorBlockCategories = ["sponsor", "intro"]
+  `
 	path := setup(t, file)
 	defer os.Remove(path)
 
@@ -99,6 +102,8 @@ timeout = 15
 	assert.EqualValues(t, "Mrs. Smith", feed.Custom.OwnerName)
 	assert.EqualValues(t, "mrs@smith.org", feed.Custom.OwnerEmail)
 	assert.EqualValues(t, "https://example.com/metadata.xml", feed.Custom.RSSMetadataURL)
+	assert.True(t, feed.Custom.SponsorBlockConfig().Enabled)
+	assert.EqualValues(t, []string{"sponsor", "intro"}, feed.Custom.SponsorBlockConfig().Categories)
 
 	assert.EqualValues(t, feed.Custom.Subcategories, []string{"1", "2"})
 
@@ -175,6 +180,27 @@ data_dir = "/data"
 	require.NoError(t, err)
 	require.NotNil(t, config)
 	assert.Equal(t, "", config.Feeds["A"].Custom.RSSMetadataURL)
+}
+
+func TestLoadConfig_InvalidSponsorBlockCategory(t *testing.T) {
+	const file = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.A]
+  url = "https://rumble.com/c/example/livestreams"
+  [feeds.A.custom]
+  sponsorBlockEnabled = true
+  sponsorBlockCategories = ["not-real"]
+`
+	path := setup(t, file)
+	defer os.Remove(path)
+
+	config, err := LoadConfig(path)
+	if err == nil {
+		t.Fatalf("expected error, got config: %+v", config)
+	}
 }
 
 func TestHttpServerListenAddress(t *testing.T) {

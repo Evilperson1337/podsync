@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,11 @@ type timeRange struct {
 	end   time.Duration
 }
 
+type trimOperation struct {
+	action string
+	range_ timeRange
+}
+
 // applyMatchedRules applies all detected rules on the original input in a single pass.
 // Inputs: ctx, inputPath, inputDur, matches, logger.
 // Outputs: new input path, cleanup func, error.
@@ -30,35 +36,10 @@ func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, input
 		logger.Warn("[trim] Input duration unknown; skipping trim")
 		return inputPath, func() {}, nil
 	}
-	keep := []timeRange{{start: 0, end: inputDur}}
-	for _, match := range matches {
-		rule := match.rule
-		result := match.result
-		start := result.SignatureStart - time.Duration(rule.PreSeconds*float64(time.Second))
-		end := result.SignatureEnd + time.Duration(rule.PostSeconds*float64(time.Second))
-		if start < 0 {
-			start = 0
-		}
-		if end < 0 {
-			end = 0
-		}
-		if end > inputDur {
-			end = inputDur
-		}
-		switch rule.Action {
-		case "cut_before":
-			keep = intersectRanges(keep, timeRange{start: end, end: inputDur})
-		case "cut_after":
-			keep = intersectRanges(keep, timeRange{start: 0, end: start})
-		case "remove_segment":
-			keep = subtractRange(keep, timeRange{start: start, end: end})
-		default:
-			logger.WithField("action", rule.Action).Debug("[trim] Unknown trim action; skipping")
-		}
-		if len(keep) == 0 {
-			logger.Warn("[trim] All audio would be removed by trim rules; skipping")
-			return inputPath, func() {}, nil
-		}
+	keep := buildTrimPlan(inputDur, matches, logger)
+	if len(keep) == 0 {
+		logger.Warn("[trim] All audio would be removed by trim rules; skipping")
+		return inputPath, func() {}, nil
 	}
 	logger.WithField("keep_ranges", formatRanges(keep)).Debug("[trim] Computed keep ranges")
 	if len(keep) == 1 && keep[0].start <= 0 && keep[0].end >= inputDur {
@@ -66,6 +47,61 @@ func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, input
 		return inputPath, func() {}, nil
 	}
 	return u.trimConcatRanges(ctx, inputPath, keep, logger)
+}
+
+func buildTrimPlan(inputDur time.Duration, matches []matchedRule, logger log.FieldLogger) []timeRange {
+	keep := []timeRange{{start: 0, end: inputDur}}
+	removeRanges := make([]timeRange, 0)
+	for _, match := range matches {
+		op, ok := buildTrimOperation(inputDur, match, logger)
+		if !ok {
+			continue
+		}
+		switch op.action {
+		case "cut_before":
+			keep = intersectRanges(keep, timeRange{start: op.range_.end, end: inputDur})
+		case "cut_after":
+			keep = intersectRanges(keep, timeRange{start: 0, end: op.range_.start})
+		case "remove_segment":
+			removeRanges = append(removeRanges, op.range_)
+		}
+		if len(keep) == 0 {
+			return nil
+		}
+	}
+	for _, remove := range mergeRanges(removeRanges) {
+		keep = subtractRange(keep, remove)
+		if len(keep) == 0 {
+			return nil
+		}
+	}
+	return keep
+}
+
+func buildTrimOperation(inputDur time.Duration, match matchedRule, logger log.FieldLogger) (trimOperation, bool) {
+	rule := match.rule
+	result := match.result
+	start := result.SignatureStart - time.Duration(rule.PreSeconds*float64(time.Second))
+	end := result.SignatureEnd + time.Duration(rule.PostSeconds*float64(time.Second))
+	if start < 0 {
+		start = 0
+	}
+	if end < 0 {
+		end = 0
+	}
+	if end > inputDur {
+		end = inputDur
+	}
+	if end <= start {
+		return trimOperation{}, false
+	}
+	switch rule.Action {
+	case "cut_before", "cut_after", "remove_segment":
+		return trimOperation{action: rule.Action, range_: timeRange{start: start, end: end}}, true
+	default:
+		logger.WithField("action", rule.Action).Debug("[trim] Unknown trim action; skipping")
+		return trimOperation{}, false
+	}
 }
 
 // trimKeepRange keeps audio between [keepStart, keepEnd].
@@ -313,4 +349,30 @@ func formatRanges(ranges []timeRange) []string {
 		formatted = append(formatted, fmt.Sprintf("%s-%s", formatDuration(r.start), formatDuration(r.end)))
 	}
 	return formatted
+}
+
+func mergeRanges(ranges []timeRange) []timeRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start == ranges[j].start {
+			return ranges[i].end < ranges[j].end
+		}
+		return ranges[i].start < ranges[j].start
+	})
+	merged := make([]timeRange, 0, len(ranges))
+	current := ranges[0]
+	for _, next := range ranges[1:] {
+		if next.start <= current.end {
+			if next.end > current.end {
+				current.end = next.end
+			}
+			continue
+		}
+		merged = append(merged, current)
+		current = next
+	}
+	merged = append(merged, current)
+	return merged
 }
