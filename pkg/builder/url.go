@@ -17,7 +17,13 @@ func ParseURL(link string) (model.Info, error) {
 
 	info := model.Info{}
 
-	if strings.HasSuffix(parsed.Host, "youtube.com") {
+	host := normalizeHost(parsed.Host)
+
+	if host == "youtu.be" {
+		host = "youtube.com"
+	}
+
+	if strings.HasSuffix(host, "youtube.com") {
 		kind, id, err := parseYoutubeURL(parsed)
 		if err != nil {
 			return model.Info{}, err
@@ -30,7 +36,7 @@ func ParseURL(link string) (model.Info, error) {
 		return info, nil
 	}
 
-	if strings.HasSuffix(parsed.Host, "vimeo.com") {
+	if strings.HasSuffix(host, "vimeo.com") {
 		kind, id, err := parseVimeoURL(parsed)
 		if err != nil {
 			return model.Info{}, err
@@ -43,7 +49,7 @@ func ParseURL(link string) (model.Info, error) {
 		return info, nil
 	}
 
-	if strings.HasSuffix(parsed.Host, "soundcloud.com") {
+	if strings.HasSuffix(host, "soundcloud.com") {
 		kind, id, err := parseSoundcloudURL(parsed)
 		if err != nil {
 			return model.Info{}, err
@@ -56,7 +62,7 @@ func ParseURL(link string) (model.Info, error) {
 		return info, nil
 	}
 
-	if strings.HasSuffix(parsed.Host, "twitch.tv") {
+	if strings.HasSuffix(host, "twitch.tv") {
 		kind, id, err := parseTwitchURL(parsed)
 		if err != nil {
 			return model.Info{}, err
@@ -69,7 +75,7 @@ func ParseURL(link string) (model.Info, error) {
 		return info, nil
 	}
 
-	if strings.HasSuffix(parsed.Host, "rumble.com") {
+	if strings.HasSuffix(host, "rumble.com") {
 		kind, id, err := parseRumbleURL(parsed)
 		if err != nil {
 			return model.Info{}, err
@@ -98,8 +104,31 @@ func parseURL(link string) (*url.URL, error) {
 	return parsed, nil
 }
 
+func normalizeHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimPrefix(host, "www.")
+	host = strings.TrimPrefix(host, "m.")
+	host = strings.TrimPrefix(host, "mobile.")
+	return host
+}
+
+func pathParts(parsed *url.URL) []string {
+	parts := strings.Split(parsed.EscapedPath(), "/")
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return filtered
+}
+
 func parseYoutubeURL(parsed *url.URL) (model.Type, string, error) {
 	path := parsed.EscapedPath()
+	parts := pathParts(parsed)
+	if strings.Contains(path, "//") {
+		return "", "", errors.New("invalid youtube link")
+	}
 
 	// https://www.youtube.com/playlist?list=PLCB9F975ECF01953C
 	// https://www.youtube.com/watch?v=rbCbho7aLYw&list=PLMpEfaKcGjpWEgNtdnsvLX6LzQL0UC0EM
@@ -118,12 +147,11 @@ func parseYoutubeURL(parsed *url.URL) (model.Type, string, error) {
 	// - https://www.youtube.com/channel/UCrlakW-ewUT8sOod6Wmzyow/videos
 	if strings.HasPrefix(path, "/channel") {
 		kind := model.TypeChannel
-		parts := strings.Split(parsed.EscapedPath(), "/")
-		if len(parts) <= 2 {
+		if len(parts) < 2 {
 			return "", "", errors.New("invalid youtube channel link")
 		}
 
-		id := parts[2]
+		id := parts[1]
 		if id == "" {
 			return "", "", errors.New("invalid id")
 		}
@@ -135,12 +163,11 @@ func parseYoutubeURL(parsed *url.URL) (model.Type, string, error) {
 	if strings.HasPrefix(path, "/user") {
 		kind := model.TypeUser
 
-		parts := strings.Split(parsed.EscapedPath(), "/")
-		if len(parts) <= 2 {
+		if len(parts) < 2 {
 			return "", "", errors.New("invalid user link")
 		}
 
-		id := parts[2]
+		id := parts[1]
 		if id == "" {
 			return "", "", errors.New("invalid id")
 		}
@@ -153,12 +180,11 @@ func parseYoutubeURL(parsed *url.URL) (model.Type, string, error) {
 	if strings.HasPrefix(path, "/@") {
 		kind := model.TypeHandle
 
-		parts := strings.Split(parsed.EscapedPath(), "/")
-		if len(parts) <= 1 {
+		if len(parts) < 1 {
 			return "", "", errors.New("invalid handle link")
 		}
 
-		handle := parts[1]
+		handle := parts[0]
 		if handle == "" || !strings.HasPrefix(handle, "@") {
 			return "", "", errors.New("invalid handle format")
 		}
@@ -176,13 +202,13 @@ func parseYoutubeURL(parsed *url.URL) (model.Type, string, error) {
 }
 
 func parseVimeoURL(parsed *url.URL) (model.Type, string, error) {
-	parts := strings.Split(parsed.EscapedPath(), "/")
-	if len(parts) <= 1 {
+	parts := pathParts(parsed)
+	if len(parts) < 1 {
 		return "", "", errors.New("invalid vimeo link path")
 	}
 
 	var kind model.Type
-	switch parts[1] {
+	switch parts[0] {
 	case "groups":
 		kind = model.TypeGroup
 	case "channels":
@@ -192,11 +218,11 @@ func parseVimeoURL(parsed *url.URL) (model.Type, string, error) {
 	}
 
 	if kind == model.TypeGroup || kind == model.TypeChannel {
-		if len(parts) <= 2 {
+		if len(parts) < 2 {
 			return "", "", errors.New("invalid channel link")
 		}
 
-		id := parts[2]
+		id := parts[1]
 		if id == "" {
 			return "", "", errors.New("invalid id")
 		}
@@ -205,7 +231,7 @@ func parseVimeoURL(parsed *url.URL) (model.Type, string, error) {
 	}
 
 	if kind == model.TypeUser {
-		id := parts[1]
+		id := parts[0]
 		if id == "" {
 			return "", "", errors.New("invalid id")
 		}
@@ -217,22 +243,22 @@ func parseVimeoURL(parsed *url.URL) (model.Type, string, error) {
 }
 
 func parseSoundcloudURL(parsed *url.URL) (model.Type, string, error) {
-	parts := strings.Split(parsed.EscapedPath(), "/")
-	if len(parts) <= 3 {
+	parts := pathParts(parsed)
+	if len(parts) < 3 {
 		return "", "", errors.New("invald soundcloud link path")
 	}
 
 	var kind model.Type
 
 	// - https://soundcloud.com/user/sets/example-set
-	switch parts[2] {
+	switch parts[1] {
 	case "sets":
 		kind = model.TypePlaylist
 	default:
 		return "", "", errors.New("invalid soundcloud url, missing sets")
 	}
 
-	id := parts[3]
+	id := parts[2]
 
 	return kind, id, nil
 }
@@ -240,14 +266,17 @@ func parseSoundcloudURL(parsed *url.URL) (model.Type, string, error) {
 func parseTwitchURL(parsed *url.URL) (model.Type, string, error) {
 	// - https://www.twitch.tv/samueletienne
 	path := parsed.EscapedPath()
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 {
+	parts := pathParts(parsed)
+	if path == "/" {
+		return "", "", errors.New("invalid id")
+	}
+	if len(parts) != 1 {
 		return "", "", errors.Errorf("invald twitch user path: %s", path)
 	}
 
 	kind := model.TypeUser
 
-	id := parts[1]
+	id := parts[0]
 	if id == "" {
 		return "", "", errors.New("invalid id")
 	}
@@ -261,21 +290,21 @@ func parseRumbleURL(parsed *url.URL) (model.Type, string, error) {
 		return "", "", errors.New("invalid rumble link path")
 	}
 
-	parts := strings.Split(path, "/")
-	if len(parts) < 3 {
+	parts := pathParts(parsed)
+	if len(parts) < 2 {
 		return "", "", errors.New("invalid rumble link path")
 	}
 
-	if parts[1] != "c" && parts[1] != "user" {
+	if parts[0] != "c" && parts[0] != "user" {
 		return "", "", errors.New("invalid rumble link path")
 	}
 
-	id := parts[2]
+	id := parts[1]
 	if id == "" {
 		return "", "", errors.New("invalid rumble channel id")
 	}
 
-	if len(parts) >= 4 && parts[3] == "livestreams" {
+	if len(parts) >= 3 && parts[2] == "livestreams" {
 		return model.TypeLivestreams, id, nil
 	}
 

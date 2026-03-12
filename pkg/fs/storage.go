@@ -6,6 +6,12 @@ import (
 	"net/http"
 )
 
+type PublishSession interface {
+	io.WriteCloser
+	Commit(ctx context.Context) (int64, error)
+	Abort() error
+}
+
 // Storage is a file system interface to host downloaded episodes and feeds.
 type Storage interface {
 	// FileSystem must be implemented to in order to pass Storage interface to HTTP file server.
@@ -13,6 +19,9 @@ type Storage interface {
 
 	// Create will create a new file from reader
 	Create(ctx context.Context, name string, reader io.Reader) (int64, error)
+
+	// BeginPublish opens an explicit staged publish session.
+	BeginPublish(ctx context.Context, name string) (PublishSession, error)
 
 	// Delete deletes the file
 	Delete(ctx context.Context, name string) error

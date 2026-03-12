@@ -48,56 +48,91 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 	}
 	logger := log.WithFields(log.Fields{"feed_id": feedConfig.ID, "episode_id": episode.ID, "signatures_root": u.sigDir})
 
-	tmpIn, err := os.CreateTemp("", "podsync-episode-*.bin")
+	inputPath, inputBytes, inputCleanup, reusedSource, err := materializeTrimInput(source)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create temp input: %w", err)
+		return nil, nil, err
 	}
-	if _, err := io.Copy(tmpIn, source); err != nil {
-		_ = tmpIn.Close()
-		_ = os.Remove(tmpIn.Name())
-		return nil, nil, fmt.Errorf("write temp input: %w", err)
-	}
-	if err := tmpIn.Close(); err != nil {
-		_ = os.Remove(tmpIn.Name())
-		return nil, nil, fmt.Errorf("close temp input: %w", err)
-	}
+	logger.WithFields(log.Fields{"input_path": inputPath, "input_bytes": inputBytes, "reused_source": reusedSource}).Info("[trim] Prepared source media for trim planning")
 
-	matches, inputDur, err := u.collectTrimMatches(ctx, feedConfig, episode, tmpIn.Name(), logger)
+	matches, inputDur, err := u.collectTrimMatches(ctx, feedConfig, episode, inputPath, logger)
 	if err != nil {
-		_ = os.Remove(tmpIn.Name())
+		if inputCleanup != nil {
+			inputCleanup()
+		}
 		return nil, nil, err
 	}
 	if len(matches) == 0 {
-		logger.Info("[trim] No trim operations configured or matched; skipping trim")
-		file, err := os.Open(tmpIn.Name())
+		logger.WithField("input_bytes", inputBytes).Info("[trim] No trim operations configured or matched; skipping trim")
+		if reusedSource {
+			return source, inputCleanup, nil
+		}
+		file, err := os.Open(inputPath)
 		if err != nil {
+			if inputCleanup != nil {
+				inputCleanup()
+			}
 			return nil, nil, fmt.Errorf("open input: %w", err)
 		}
 		cleanup := func() {
 			_ = file.Close()
-			_ = os.Remove(tmpIn.Name())
+			if inputCleanup != nil {
+				inputCleanup()
+			}
 		}
 		return file, cleanup, nil
 	}
 
-	logger.WithField("matched_rules", len(matches)).Info("[trim] Applying planned trim rules")
-	newInput, newCleanup, err := u.applyMatchedRules(ctx, tmpIn.Name(), inputDur, matches, logger)
+	logger.WithFields(log.Fields{"matched_rules": len(matches), "input_bytes": inputBytes, "input_duration": inputDur}).Info("[trim] Applying planned trim rules")
+	newInput, newCleanup, err := u.applyMatchedRules(ctx, inputPath, inputDur, matches, logger)
 	if err != nil {
-		_ = os.Remove(tmpIn.Name())
+		if inputCleanup != nil {
+			inputCleanup()
+		}
 		return nil, nil, err
 	}
 	file, err := os.Open(newInput)
 	if err != nil {
 		newCleanup()
-		_ = os.Remove(tmpIn.Name())
+		if inputCleanup != nil {
+			inputCleanup()
+		}
 		return nil, nil, fmt.Errorf("open final input: %w", err)
 	}
 	cleanup := func() {
 		_ = file.Close()
 		newCleanup()
-		_ = os.Remove(tmpIn.Name())
+		if inputCleanup != nil {
+			inputCleanup()
+		}
 	}
 	return file, cleanup, nil
+}
+
+func materializeTrimInput(source io.Reader) (string, int64, func(), bool, error) {
+	if named, ok := source.(interface{ Name() string }); ok {
+		path := named.Name()
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, info.Size(), nil, true, nil
+		}
+	}
+	tmpIn, err := os.CreateTemp("", "podsync-episode-*.bin")
+	if err != nil {
+		return "", 0, nil, false, fmt.Errorf("create temp input: %w", err)
+	}
+	inputBytes, err := io.Copy(tmpIn, source)
+	if err != nil {
+		_ = tmpIn.Close()
+		_ = os.Remove(tmpIn.Name())
+		return "", 0, nil, false, fmt.Errorf("write temp input: %w", err)
+	}
+	if err := tmpIn.Close(); err != nil {
+		_ = os.Remove(tmpIn.Name())
+		return "", 0, nil, false, fmt.Errorf("close temp input: %w", err)
+	}
+	cleanup := func() {
+		_ = os.Remove(tmpIn.Name())
+	}
+	return tmpIn.Name(), inputBytes, cleanup, false, nil
 }
 
 func (u *Manager) collectTrimMatches(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, inputPath string, logger log.FieldLogger) ([]matchedRule, time.Duration, error) {
@@ -278,38 +313,4 @@ func sponsorBlockVideoID(episode *model.Episode) string {
 		return ""
 	}
 	return "v" + matches[1]
-}
-
-// findSignatureFile finds the first audio signature file under /data/signatures/<feedID>.
-// Inputs: feedID.
-// Outputs: signature file path or empty string if none.
-// Example usage:
-//
-//	sigPath, err := u.findSignatureFile("crowder")
-//
-// Notes: Returns first matching file by extension.
-func (u *Manager) findSignatureFile(feedID string) (string, error) {
-	if feedID == "" {
-		return "", nil
-	}
-	baseDir := filepath.Join(u.sigDir, feedID, "signatures")
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("read signatures dir: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		ext := strings.ToLower(filepath.Ext(name))
-		switch ext {
-		case ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac":
-			return filepath.Join(baseDir, name), nil
-		}
-	}
-	return "", nil
 }

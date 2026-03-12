@@ -86,6 +86,29 @@ func TestS3_BuildKey(t *testing.T) {
 	assert.EqualValues(t, "mock-prefix/test-fn", key)
 }
 
+func TestS3BeginPublishCommitAndAbort(t *testing.T) {
+	files := make(map[string][]byte)
+	stor, err := newMockS3(files, "")
+	assert.NoError(t, err)
+
+	session, err := stor.BeginPublish(testCtx, "1/test")
+	assert.NoError(t, err)
+	_, err = session.Write([]byte("abc"))
+	assert.NoError(t, err)
+	size, err := session.Commit(testCtx)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 3, size)
+	assert.EqualValues(t, []byte("abc"), files["1/test"])
+
+	session, err = stor.BeginPublish(testCtx, "1/abort")
+	assert.NoError(t, err)
+	_, err = session.Write([]byte("abc"))
+	assert.NoError(t, err)
+	assert.NoError(t, session.Abort())
+	_, ok := files["1/abort"]
+	assert.False(t, ok)
+}
+
 type mockS3API struct {
 	s3iface.S3API
 	files map[string][]byte
@@ -121,4 +144,21 @@ func (m *mockS3API) DeleteObjectWithContext(ctx aws.Context, input *s3.DeleteObj
 		return &s3.DeleteObjectOutput{}, nil
 	}
 	return nil, awserr.New("NotFound", "", nil)
+}
+
+func (m *mockS3API) CopyObjectWithContext(ctx aws.Context, input *s3.CopyObjectInput, opts ...request.Option) (*s3.CopyObjectOutput, error) {
+	copySource := aws.StringValue(input.CopySource)
+	idx := len("mock-bucket/")
+	if len(copySource) <= idx {
+		return nil, awserr.New("NotFound", "", nil)
+	}
+	sourceKey := copySource[idx:]
+	data, ok := m.files[sourceKey]
+	if !ok {
+		return nil, awserr.New("NotFound", "", nil)
+	}
+	cloned := make([]byte, len(data))
+	copy(cloned, data)
+	m.files[aws.StringValue(input.Key)] = cloned
+	return &s3.CopyObjectOutput{}, nil
 }

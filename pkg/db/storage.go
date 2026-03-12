@@ -41,4 +41,16 @@ type Storage interface {
 
 	// WalkEpisodes iterates over episodes that belong to the given feed ID
 	WalkEpisodes(ctx context.Context, feedID string, cb func(episode *model.Episode) error) error
+
+	// GetHealthSummary retrieves the persisted health summary cache.
+	GetHealthSummary(ctx context.Context) (*model.HealthSummary, error)
+
+	// SetHealthSummary stores a persisted health summary cache.
+	SetHealthSummary(ctx context.Context, summary *model.HealthSummary) error
+
+	// GetPublicationSummary retrieves persisted publication summary data.
+	GetPublicationSummary(ctx context.Context) (*model.PublicationSummary, error)
+
+	// SetPublicationSummary stores persisted publication summary data.
+	SetPublicationSummary(ctx context.Context, summary *model.PublicationSummary) error
 }

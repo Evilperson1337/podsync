@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -38,8 +39,14 @@ type Config struct {
 	Tokens map[model.Provider]StringSlice `toml:"tokens"`
 	// Downloader (youtube-dl) configuration
 	Downloader ytdl.Config `toml:"downloader"`
+	// Signatures configuration for optional audio signature trimming.
+	Signatures SignatureConfig `toml:"signatures"`
 	// Global cleanup policy applied to feeds that don't specify their own cleanup policy
 	Cleanup *feed.Cleanup `toml:"cleanup"`
+}
+
+type SignatureConfig struct {
+	RootDir string `toml:"root_dir"`
 }
 
 type Log struct {
@@ -115,6 +122,9 @@ func (c *Config) validate() error {
 		if c.Storage.S3.EndpointURL == "" || c.Storage.S3.Region == "" || c.Storage.S3.Bucket == "" {
 			result = multierror.Append(result, errors.New("S3 storage requires endpoint_url, region and bucket to be set"))
 		}
+		if strings.Contains(c.Server.Hostname, "localhost") || strings.Contains(c.Server.Hostname, "127.0.0.1") {
+			result = multierror.Append(result, errors.New("server.hostname must be externally reachable when using S3 storage"))
+		}
 	default:
 		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
 	}
@@ -128,6 +138,16 @@ func (c *Config) validate() error {
 
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
+		}
+
+		if err := validateCustomFormat(id, f); err != nil {
+			result = multierror.Append(result, err)
+		}
+		if err := validateHooks(id, f.PostEpisodeDownload, "post_episode_download"); err != nil {
+			result = multierror.Append(result, err)
+		}
+		if err := validateHooks(id, f.OnEpisodeDownloadError, "on_episode_download_error"); err != nil {
+			result = multierror.Append(result, err)
 		}
 
 		if rssURL := strings.TrimSpace(f.Custom.RSSMetadataURL); rssURL != "" {
@@ -296,6 +316,44 @@ func validateSponsorBlockConfig(feedID string, cfg feed.SponsorBlock) error {
 	for _, category := range cfg.Categories {
 		if !slices.Contains(feed.ValidSponsorBlockCategories(), category) {
 			return errors.Errorf("invalid sponsorblock category %q for %q", category, feedID)
+		}
+	}
+	return nil
+}
+
+func validateCustomFormat(feedID string, cfg *feed.Config) error {
+	if cfg.Format != model.FormatCustom {
+		return nil
+	}
+	var result *multierror.Error
+	if strings.TrimSpace(cfg.CustomFormat.Extension) == "" {
+		result = multierror.Append(result, errors.Errorf("custom_format.extension is required for %q when format=custom", feedID))
+	}
+	if strings.TrimSpace(cfg.CustomFormat.YouTubeDLFormat) == "" {
+		result = multierror.Append(result, errors.Errorf("custom_format.youtube_dl_format is required for %q when format=custom", feedID))
+	}
+	return result.ErrorOrNil()
+}
+
+func validateHooks(feedID string, hooks []*feed.ExecHook, field string) error {
+	for idx, hook := range hooks {
+		if hook == nil {
+			return errors.Errorf("%s[%d] for %q cannot be nil", field, idx, feedID)
+		}
+		if len(hook.Command) == 0 {
+			return errors.Errorf("%s[%d] for %q must define command", field, idx, feedID)
+		}
+		if hook.Timeout < 0 {
+			return errors.Errorf("%s[%d] for %q timeout must be non-negative", field, idx, feedID)
+		}
+		switch strings.ToLower(strings.TrimSpace(hook.Shell)) {
+		case "", "none", "cmd", "powershell", "pwsh":
+		case "sh":
+			if runtime.GOOS == "windows" {
+				return errors.Errorf("%s[%d] for %q cannot use shell=sh on Windows", field, idx, feedID)
+			}
+		default:
+			return errors.Errorf("%s[%d] for %q uses unsupported shell %q", field, idx, feedID, hook.Shell)
 		}
 	}
 	return nil

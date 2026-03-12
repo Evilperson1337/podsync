@@ -18,6 +18,10 @@ func BuildOPML(ctx context.Context, feeds map[string]*Config, db feedProvider, h
 	doc.Body = opml.Body{}
 
 	for _, feed := range feeds {
+		if !feed.OPML {
+			continue
+		}
+
 		f, err := db.GetFeed(ctx, feed.ID)
 		if err == model.ErrNotFound {
 			// As we update OPML on per-feed basis, some feeds may not yet be populated in database.
@@ -25,10 +29,6 @@ func BuildOPML(ctx context.Context, feeds map[string]*Config, db feedProvider, h
 			continue
 		} else if err != nil {
 			return "", errors.Wrapf(err, "failed to query feed %q", feed.ID)
-		}
-
-		if !feed.OPML {
-			continue
 		}
 
 		outline := opml.Outline{

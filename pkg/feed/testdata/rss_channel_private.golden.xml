@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Private Feed Title</title>
+    <link>https://example.com/channel</link>
+    <description>Private feed description</description>
+    <category>TV &amp; Film</category>
+    <generator>Podsync generator (support us at https://github.com/mxpv/podsync)</generator>
+    <language>en-us</language>
+    <lastBuildDate>__LASTBUILD__</lastBuildDate>
+    <pubDate>__PUBDATE__</pubDate>
+    <itunes:author>Private Author</itunes:author>
+    <itunes:summary><![CDATA[Private feed description]]></itunes:summary>
+    <itunes:block>yes</itunes:block>
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:category text="TV &amp; Film"></itunes:category>
+    <item>
+      <guid>private-1</guid>
+      <title><![CDATA[Private Episode]]></title>
+      <link>https://podsync.domain.com/private/private-1.mp4</link>
+      <description><![CDATA[Private episode description]]></description>
+      <pubDate>__PUBDATE__</pubDate>
+      <enclosure url="https://podsync.domain.com/private/private-1.mp4" length="2048" type="video/mp4"></enclosure>
+      <itunes:author>Private Author</itunes:author>
+      <itunes:summary><![CDATA[Private episode summary]]></itunes:summary>
+      <itunes:duration>00:02:05</itunes:duration>
+      <itunes:explicit>false</itunes:explicit>
+      <itunes:order>1</itunes:order>
+    </item>
+  </channel>
+</rss>

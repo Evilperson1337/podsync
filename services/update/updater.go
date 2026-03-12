@@ -1,13 +1,14 @@
 package update
 
 import (
-	"bytes"
 	"context"
+	"expvar"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -23,6 +24,14 @@ import (
 	"github.com/mxpv/podsync/pkg/ytdl"
 )
 
+var (
+	metricPublicationXMLBuilds  = expvar.NewInt("publication_xml_builds_total")
+	metricPublicationOPMLBuilds = expvar.NewInt("publication_opml_builds_total")
+	metricReconciledEpisodes    = expvar.NewInt("reconciled_episodes_total")
+	metricFeedRunSuccesses      = expvar.NewInt("feed_run_successes_total")
+	metricFeedRunFailures       = expvar.NewInt("feed_run_failures_total")
+)
+
 type Downloader interface {
 	Download(ctx context.Context, feedConfig *feed.Config, episode *model.Episode) (io.ReadCloser, error)
 	PlaylistMetadata(ctx context.Context, url string) (metadata ytdl.PlaylistMetadata, err error)
@@ -31,57 +40,101 @@ type Downloader interface {
 type TokenList []string
 
 type Manager struct {
-	hostname   string
-	downloader Downloader
-	db         db.Storage
-	fs         fs.Storage
-	feeds      map[string]*feed.Config
-	keys       map[model.Provider]feed.KeyProvider
-	sigDir     string
-	overlay    *overlay.Manager
+	hostname    string
+	downloader  Downloader
+	db          db.Storage
+	fs          fs.Storage
+	feeds       map[string]*feed.Config
+	keys        map[model.Provider]feed.KeyProvider
+	sigDir      string
+	overlay     *overlay.Manager
+	buildFeed   func(ctx context.Context, cfg *feed.Config) (*model.Feed, error)
+	opml        *OPMLPublisher
+	publication *PublicationService
 }
 
 func NewUpdater(
 	feeds map[string]*feed.Config,
 	keys map[model.Provider]feed.KeyProvider,
 	hostname string,
+	signaturesRoot string,
 	downloader Downloader,
 	db db.Storage,
 	storage fs.Storage,
 ) (*Manager, error) {
-	sigDir := os.Getenv("PODSYNC_SIGNATURES_DIR")
+	sigDir := strings.TrimSpace(signaturesRoot)
 	if sigDir == "" {
-		sigDir = "/data"
+		sigDir = strings.TrimSpace(os.Getenv("PODSYNC_SIGNATURES_DIR"))
 	}
-	if localFS, ok := storage.(*fs.Local); ok {
+	if sigDir == "" {
+		if localFS, ok := storage.(*fs.Local); ok {
+			sigDir = localFS.RootDir()
+		}
+	}
+	if localFS, ok := storage.(*fs.Local); ok && sigDir == "" {
 		sigDir = localFS.RootDir()
 	}
-	log.WithFields(log.Fields{
-		"signatures_root": sigDir,
-		"signatures_dir":  filepath.Join(sigDir, "<feed_id>", "signatures"),
-	}).Info("signature trim enabled")
+	if sigDir != "" {
+		log.WithFields(log.Fields{
+			"signatures_root": sigDir,
+			"signatures_dir":  filepath.Join(sigDir, "<feed_id>", "signatures"),
+		}).Info("signature trim enabled")
+	}
 	return &Manager{
-		hostname:   hostname,
-		downloader: downloader,
-		db:         db,
-		fs:         storage,
-		feeds:      feeds,
-		keys:       keys,
-		sigDir:     sigDir,
-		overlay:    overlay.NewDefaultManager(nil),
+		hostname:    hostname,
+		downloader:  downloader,
+		db:          db,
+		fs:          storage,
+		feeds:       feeds,
+		keys:        keys,
+		sigDir:      sigDir,
+		overlay:     overlay.NewDefaultManager(nil),
+		publication: NewPublicationService(db, storage, feeds, hostname),
+		buildFeed: func(ctx context.Context, cfg *feed.Config) (*model.Feed, error) {
+			return defaultBuildFeed(ctx, cfg, keys, downloader)
+		},
 	}, nil
 }
 
+func defaultBuildFeed(ctx context.Context, feedConfig *feed.Config, keys map[model.Provider]feed.KeyProvider, downloader Downloader) (*model.Feed, error) {
+	info, err := builder.ParseURL(feedConfig.URL)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse URL: %s", feedConfig.URL)
+	}
+
+	keyProvider, ok := keys[info.Provider]
+	if !ok {
+		return nil, errors.Errorf("key provider %q not loaded", info.Provider)
+	}
+
+	provider, err := builder.New(ctx, info.Provider, keyProvider.Get(), downloader)
+	if err != nil {
+		return nil, err
+	}
+
+	return provider.Build(ctx, feedConfig)
+}
+
+func (u *Manager) SetOPMLPublisher(publisher *OPMLPublisher) {
+	u.opml = publisher
+}
+
 func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
-	log.WithFields(log.Fields{
+	logger := loggerWithExecution(ctx, log.Fields{
 		"feed_id": feedConfig.ID,
 		"format":  feedConfig.Format,
 		"quality": feedConfig.Quality,
-	}).Infof("-> updating %s", feedConfig.URL)
+	})
+	logger.Infof("-> updating %s", feedConfig.URL)
 
 	started := time.Now()
+	if err := u.reconcileFeedState(ctx, feedConfig); err != nil {
+		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
+		return errors.Wrap(err, "reconcile failed")
+	}
 
 	if err := u.updateFeed(ctx, feedConfig); err != nil {
+		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
 		return errors.Wrap(err, "update failed")
 	}
 
@@ -92,6 +145,7 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	}
 
 	if err := u.downloadEpisodes(ctx, feedConfig, episodesToDownload); err != nil {
+		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
 		return errors.Wrap(err, "download failed")
 	}
 
@@ -100,44 +154,91 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	}
 
 	if err := u.buildXML(ctx, feedConfig); err != nil {
+		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
 		return errors.Wrap(err, "xml build failed")
 	}
 
-	if err := u.buildOPML(ctx); err != nil {
-		return errors.Wrap(err, "opml build failed")
+	if u.shouldBuildOPML(feedConfig) {
+		if u.opml != nil {
+			u.opml.Request(ctx)
+		} else {
+			if err := u.buildOPML(ctx); err != nil {
+				_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
+				return errors.Wrap(err, "opml build failed")
+			}
+		}
 	}
 
 	elapsed := time.Since(started)
-	log.Infof("successfully updated feed in %s", elapsed)
+	_ = u.recordFeedRunSuccess(ctx, feedConfig.ID)
+	logger.WithField("duration", elapsed).Info("successfully updated feed")
 	return nil
+}
+
+func (u *Manager) recordFeedRunSuccess(ctx context.Context, feedID string) error {
+	feedModel, err := u.db.GetFeed(ctx, feedID)
+	if err != nil {
+		return err
+	}
+	feedModel.LastSuccessAt = time.Now().UTC()
+	hasErroredEpisodes, err := u.feedHasErroredEpisodes(ctx, feedID)
+	if err != nil {
+		return err
+	}
+	metricFeedRunSuccesses.Add(1)
+	if !hasErroredEpisodes {
+		feedModel.LastFailureAt = time.Time{}
+		feedModel.LastFailure = ""
+	}
+	return u.db.AddFeed(ctx, feedID, feedModel)
+}
+
+func (u *Manager) recordFeedRunFailure(ctx context.Context, feedID string, runErr error) error {
+	feedModel, err := u.db.GetFeed(ctx, feedID)
+	if err != nil {
+		return err
+	}
+	feedModel.LastFailureAt = time.Now().UTC()
+	if runErr != nil {
+		feedModel.LastFailure = runErr.Error()
+	}
+	metricFeedRunFailures.Add(1)
+	return u.db.AddFeed(ctx, feedID, feedModel)
+}
+
+func (u *Manager) feedHasErroredEpisodes(ctx context.Context, feedID string) (bool, error) {
+	hasFailure := false
+	err := u.db.WalkEpisodes(ctx, feedID, func(episode *model.Episode) error {
+		if episode.Status == model.EpisodeError {
+			hasFailure = true
+		}
+		return nil
+	})
+	return hasFailure, err
+}
+
+func (u *Manager) shouldBuildOPML(feedConfig *feed.Config) bool {
+	if feedConfig != nil && feedConfig.OPML {
+		return true
+	}
+	for _, cfg := range u.feeds {
+		if cfg != nil && cfg.OPML {
+			return false
+		}
+	}
+	return true
 }
 
 // updateFeed pulls API for new episodes and saves them to database
 func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error {
-	info, err := builder.ParseURL(feedConfig.URL)
-	if err != nil {
-		return errors.Wrapf(err, "failed to parse URL: %s", feedConfig.URL)
-	}
-
-	keyProvider, ok := u.keys[info.Provider]
-	if !ok {
-		return errors.Errorf("key provider %q not loaded", info.Provider)
-	}
-
-	// Create an updater for this feed type
-	provider, err := builder.New(ctx, info.Provider, keyProvider.Get(), u.downloader)
+	logger := loggerWithExecution(ctx, log.Fields{"feed_id": feedConfig.ID})
+	logger.Debug("building feed")
+	result, err := u.buildFeed(ctx, feedConfig)
 	if err != nil {
 		return err
 	}
 
-	// Query API to get episodes
-	log.Debug("building feed")
-	result, err := provider.Build(ctx, feedConfig)
-	if err != nil {
-		return err
-	}
-
-	log.Debugf("received %d episode(s) for %q", len(result.Episodes), result.Title)
+	logger.WithFields(log.Fields{"episodes": len(result.Episodes), "title": result.Title}).Debug("received episodes from builder")
 
 	if err := u.overlay.Apply(ctx, feedConfig, result); err != nil {
 		return err
@@ -145,7 +246,7 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 
 	episodeSet := make(map[string]struct{})
 	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
-		if episode.Status != model.EpisodeDownloaded && episode.Status != model.EpisodeCleaned {
+		if !model.IsEpisodePublishable(episode.Status) && episode.Status != model.EpisodeCleaned {
 			episodeSet[episode.ID] = struct{}{}
 		}
 		return nil
@@ -174,7 +275,7 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 		}
 	}
 
-	log.Debug("successfully saved updates to storage")
+	logger.Debug("successfully saved updates to storage")
 	return nil
 }
 
@@ -226,14 +327,15 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 		pageSize     = feedConfig.PageSize
 	)
 
-	log.WithField("page_size", pageSize).Info("fetching episodes for download")
+	logger := loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "page_size": pageSize})
+	logger.Info("fetching episodes for download")
 
 	// Build the list of files to download
 	err := u.db.WalkEpisodes(ctx, feedID, func(episode *model.Episode) error {
 		var (
-			logger = log.WithFields(log.Fields{"episode_id": episode.ID})
+			logger = loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "episode_id": episode.ID})
 		)
-		if episode.Status != model.EpisodeNew && episode.Status != model.EpisodeError {
+		if episode.Status != model.EpisodeNew && episode.Status != model.EpisodeError && episode.Status != model.EpisodePlanned {
 			// File already downloaded
 			logger.Infof("skipping due to already downloaded")
 			return nil
@@ -249,7 +351,13 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 			return nil
 		}
 
-		log.Debugf("adding %s (%q) to queue", episode.ID, episode.Title)
+		logger.WithField("title", episode.Title).Debug("adding episode to download queue")
+		if err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+			existing.Status = model.EpisodePlanned
+			return nil
+		}); err != nil {
+			return err
+		}
 		downloadList = append(downloadList, episode)
 		return nil
 	})
@@ -266,12 +374,13 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		downloadCount = len(downloadList)
 		downloaded    = 0
 		feedID        = feedConfig.ID
+		hadFailures   bool
 	)
 
 	if downloadCount > 0 {
-		log.Infof("download count: %d", downloadCount)
+		loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "download_count": downloadCount}).Info("episodes selected for download")
 	} else {
-		log.Info("no episodes to download")
+		loggerWithExecution(ctx, log.Fields{"feed_id": feedID}).Info("no episodes to download")
 		return nil
 	}
 
@@ -279,7 +388,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 
 	for idx, episode := range downloadList {
 		var (
-			logger      = log.WithFields(log.Fields{"index": idx, "episode_id": episode.ID})
+			logger      = loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "index": idx, "episode_id": episode.ID})
 			episodeName = feed.EpisodeName(feedConfig, episode)
 		)
 
@@ -291,7 +400,10 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			// File already exists, update file status and disk size
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 				episode.Size = size
-				episode.Status = model.EpisodeDownloaded
+				episode.Status = model.EpisodeStored
+				episode.LastError = ""
+				episode.LastErrorAt = time.Time{}
+				episode.FailureCategory = ""
 				return nil
 			}); err != nil {
 				logger.WithError(err).Error("failed to update file info")
@@ -311,6 +423,12 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		// while still being processed by youtube-dl (e.g. a file is being downloaded from YT or encoding in progress)
 
 		logger.Infof("! downloading episode %s", episode.VideoURL)
+		if err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+			existing.Status = model.EpisodeDownloading
+			return nil
+		}); err != nil {
+			return err
+		}
 		tempFile, err := u.downloader.Download(ctx, feedConfig, episode)
 		if err != nil {
 			// YouTube might block host with HTTP Error 429: Too Many Requests
@@ -340,25 +458,42 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 				episode.Status = model.EpisodeError
+				episode.LastError = err.Error()
+				episode.LastErrorAt = time.Now().UTC()
+				episode.RetryCount++
+				episode.FailureCategory = classifyFailure(err)
 				return nil
 			}); err != nil {
 				return err
 			}
+			hadFailures = true
 
 			continue
 		}
 
 		logger.Debug("copying file")
+		if err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+			existing.Status = model.EpisodeProcessing
+			return nil
+		}); err != nil {
+			tempFile.Close()
+			return err
+		}
 		trimmedReader, trimmedCleanup, err := u.trimEpisodeIfSignatureFound(ctx, feedConfig, episode, tempFile)
 		if err != nil {
 			tempFile.Close()
 			logger.WithError(err).Error("signature trim failed")
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 				episode.Status = model.EpisodeError
+				episode.LastError = err.Error()
+				episode.LastErrorAt = time.Now().UTC()
+				episode.RetryCount++
+				episode.FailureCategory = model.FailureCategoryProcessing
 				return nil
 			}); err != nil {
 				return err
 			}
+			hadFailures = true
 			continue
 		}
 		if trimmedCleanup != nil {
@@ -370,13 +505,21 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				processedDuration = int64(duration.Seconds())
 			}
 		}
-		fileSize, err := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), trimmedReader)
+		publishResult, err := fs.NewPublisher(u.fs).Publish(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), trimmedReader, fs.PublishOptions{MinSize: 1})
 		tempFile.Close()
 		if err != nil {
 			if trimmedCleanup != nil {
 				trimmedCleanup()
 			}
 			logger.WithError(err).Error("failed to copy file")
+			_ = u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+				existing.Status = model.EpisodeError
+				existing.LastError = err.Error()
+				existing.LastErrorAt = time.Now().UTC()
+				existing.RetryCount++
+				existing.FailureCategory = model.FailureCategoryStorage
+				return nil
+			})
 			return err
 		}
 		if trimmedCleanup != nil {
@@ -404,11 +547,14 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 
 		logger.Infof("successfully downloaded file %q", episode.ID)
 		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
-			episode.Size = fileSize
+			episode.Size = publishResult.Size
 			if processedDuration > 0 {
 				episode.Duration = processedDuration
 			}
-			episode.Status = model.EpisodeDownloaded
+			episode.Status = model.EpisodeStored
+			episode.LastError = ""
+			episode.LastErrorAt = time.Time{}
+			episode.FailureCategory = ""
 			return nil
 		}); err != nil {
 			return err
@@ -417,57 +563,37 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		downloaded++
 	}
 
-	log.Infof("downloaded %d episode(s)", downloaded)
+	loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "downloaded": downloaded}).Info("download stage completed")
+	if hadFailures {
+		_ = u.recordFeedRunFailure(ctx, feedID, errors.New("one or more episode downloads failed"))
+	}
 	return nil
 }
 
 func (u *Manager) buildXML(ctx context.Context, feedConfig *feed.Config) error {
-	f, err := u.db.GetFeed(ctx, feedConfig.ID)
-	if err != nil {
-		return err
-	}
-
-	// Build iTunes XML feed with data received from builder
-	log.Debug("building iTunes podcast feed")
-	podcast, err := feed.Build(ctx, f, feedConfig, u.hostname)
-	if err != nil {
-		return err
-	}
-	xmlText, err := feed.RenderXML(podcast, f.Episodes)
-	if err != nil {
-		return err
-	}
-
-	var (
-		reader  = bytes.NewReader([]byte(xmlText))
-		xmlName = fmt.Sprintf("%s.xml", feedConfig.ID)
-	)
-
-	if _, err := u.fs.Create(ctx, xmlName, reader); err != nil {
-		return errors.Wrap(err, "failed to upload new XML feed")
-	}
-
-	return nil
+	return u.publicationService().PublishFeedXML(ctx, feedConfig)
 }
 
 func (u *Manager) buildOPML(ctx context.Context) error {
-	// Build OPML with data received from builder
-	log.Debug("building podcast OPML")
-	opml, err := feed.BuildOPML(ctx, u.feeds, u.db, u.hostname)
-	if err != nil {
-		return err
+	return u.publicationService().PublishOPML(ctx)
+}
+
+func (u *Manager) publicationService() *PublicationService {
+	if u.publication == nil {
+		u.publication = NewPublicationService(u.db, u.fs, u.feeds, u.hostname)
 	}
+	return u.publication
+}
 
-	var (
-		reader  = bytes.NewReader([]byte(opml))
-		xmlName = fmt.Sprintf("%s.opml", "podsync")
-	)
+func (u *Manager) BuildOPMLNow(ctx context.Context) error {
+	return u.buildOPML(ctx)
+}
 
-	if _, err := u.fs.Create(ctx, xmlName, reader); err != nil {
-		return errors.Wrap(err, "failed to upload OPML")
+func (u *Manager) FlushOPML(ctx context.Context) error {
+	if u.opml == nil {
+		return nil
 	}
-
-	return nil
+	return u.opml.Flush(ctx)
 }
 
 func (u *Manager) cleanup(ctx context.Context, feedConfig *feed.Config) error {
@@ -491,7 +617,7 @@ func (u *Manager) cleanup(ctx context.Context, feedConfig *feed.Config) error {
 
 	logger.WithField("count", count).Info("running cleaner")
 	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
-		if episode.Status == model.EpisodeDownloaded {
+		if model.IsEpisodePublishable(episode.Status) {
 			list = append(list, episode)
 		}
 		return nil
@@ -538,4 +664,51 @@ func (u *Manager) cleanup(ctx context.Context, feedConfig *feed.Config) error {
 	}
 
 	return result.ErrorOrNil()
+}
+
+func (u *Manager) reconcileFeedState(ctx context.Context, feedConfig *feed.Config) error {
+	logger := loggerWithExecution(ctx, log.Fields{"feed_id": feedConfig.ID})
+	updated := 0
+	err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
+		switch episode.Status {
+		case model.EpisodePlanned, model.EpisodeDownloading, model.EpisodeProcessing, model.EpisodeStored:
+			updated++
+			return u.db.UpdateEpisode(feedConfig.ID, episode.ID, func(existing *model.Episode) error {
+				existing.Status = model.EpisodeError
+				existing.LastError = "recovered from interrupted update"
+				existing.LastErrorAt = time.Now().UTC()
+				existing.RetryCount++
+				existing.FailureCategory = model.FailureCategoryUnknown
+				return nil
+			})
+		default:
+			return nil
+		}
+	})
+	if err != nil {
+		return err
+	}
+	if updated > 0 {
+		metricReconciledEpisodes.Add(int64(updated))
+		logger.WithField("reconciled_episodes", updated).Warn("reconciled incomplete episode states before update")
+	}
+	return nil
+}
+
+func classifyFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, ytdl.ErrTooManyRequests) {
+		return model.FailureCategoryProvider
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "timeout"), strings.Contains(message, "connection"), strings.Contains(message, "network"):
+		return model.FailureCategoryNetwork
+	case strings.Contains(message, "ffmpeg"), strings.Contains(message, "ffprobe"), strings.Contains(message, "signature"):
+		return model.FailureCategoryProcessing
+	default:
+		return model.FailureCategoryUnknown
+	}
 }

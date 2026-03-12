@@ -2,6 +2,8 @@ package feed
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -48,7 +50,7 @@ func TestBuildXML(t *testing.T) {
 	assert.EqualValues(t, out.Items[0].Enclosure.Type, itunes.MP4)
 }
 
-func TestBuildXMLUsesRSSSubtitleAndSummaryFields(t *testing.T) {
+func TestBuildXMLUsesRSSSummaryWithoutSubtitle(t *testing.T) {
 	feed := model.Feed{
 		Episodes: []*model.Episode{{
 			ID:            "1",
@@ -73,7 +75,7 @@ func TestBuildXMLUsesRSSSubtitleAndSummaryFields(t *testing.T) {
 	xmlText := out.String()
 	assert.Contains(t, xmlText, `<title>NYC ISIS Attack Proves Definitively - Islam &amp; America are Incompatible</title>`)
 	assert.Contains(t, xmlText, `<description>Short summary &amp; context</description>`)
-	assert.Contains(t, xmlText, `<itunes:subtitle>NYC ISIS Attack Proves Definitively - Islam &amp; America are Incompatible</itunes:subtitle>`)
+	assert.NotContains(t, xmlText, `<itunes:subtitle>`)
 	assert.Contains(t, xmlText, `<itunes:summary><![CDATA[Short summary & context]]></itunes:summary>`)
 	assert.False(t, strings.Contains(xmlText, `&amp;amp;`))
 	assert.NotContains(t, xmlText, `<itunes:keywords>`)
@@ -105,7 +107,7 @@ func TestRenderXMLRewritesItemTextFieldsAsCDATA(t *testing.T) {
 
 	assert.Contains(t, xmlText, `<title><![CDATA[NYC ISIS Attack Proves Definitively - Islam & America are Incompatible]]></title>`)
 	assert.Contains(t, xmlText, `<description><![CDATA[Democrat Senate candidate James Talarico can't seem to stop shilling for the Left.]]></description>`)
-	assert.Contains(t, xmlText, `<itunes:subtitle><![CDATA[NYC ISIS Attack Proves Definitively - Islam & America are Incompatible]]></itunes:subtitle>`)
+	assert.NotContains(t, xmlText, `<itunes:subtitle>`)
 	assert.NotContains(t, xmlText, `Islam &amp; America`)
 	assert.NotContains(t, xmlText, `can&#39;t`)
 }
@@ -139,4 +141,103 @@ func TestRenderXMLIncludesExtendedRSSMetadataFields(t *testing.T) {
 	assert.Contains(t, xmlText, `<itunes:season>2026</itunes:season>`)
 	assert.Contains(t, xmlText, `<itunes:episode>44</itunes:episode>`)
 	assert.Contains(t, xmlText, `<itunes:episodeType>full</itunes:episodeType>`)
+}
+
+func TestRenderXMLMatchesGolden(t *testing.T) {
+	feedModel := model.Feed{
+		Format: model.FormatAudio,
+		Episodes: []*model.Episode{{
+			ID:            "1",
+			Status:        model.EpisodeDownloaded,
+			Title:         "NYC ISIS Attack Proves Definitively - Islam & America are Incompatible",
+			Description:   "Democrat Senate candidate James Talarico was pitched as the moderate option.",
+			Duration:      3712,
+			Size:          35263725,
+			Season:        2026,
+			EpisodeNumber: 44,
+			EpisodeType:   "full",
+		}},
+	}
+
+	cfg := Config{ID: "crowder", Format: model.FormatAudio}
+	podcast, err := Build(context.Background(), &feedModel, &cfg, "https://podsync.domain.com")
+	require.NoError(t, err)
+	xmlText, err := RenderXML(podcast, feedModel.Episodes)
+	require.NoError(t, err)
+
+	golden, err := os.ReadFile("testdata/rss_extended.golden.xml")
+	require.NoError(t, err)
+	normalize := func(value string) string {
+		pubDateRe := regexp.MustCompile(`<pubDate>.*?</pubDate>`)
+		lastBuildRe := regexp.MustCompile(`<lastBuildDate>.*?</lastBuildDate>`)
+		value = strings.ReplaceAll(value, "\r\n", "\n")
+		value = pubDateRe.ReplaceAllString(value, `<pubDate>__PUBDATE__</pubDate>`)
+		value = lastBuildRe.ReplaceAllString(value, `<lastBuildDate>__LASTBUILD__</lastBuildDate>`)
+		value = strings.TrimSpace(value)
+		return value
+	}
+	assert.Equal(t, normalize(string(golden)), normalize(xmlText))
+}
+
+func TestRenderXMLMatchesPrivateChannelGolden(t *testing.T) {
+	feedModel := model.Feed{
+		Title:       "Private Feed Title",
+		Description: "Private feed description",
+		Author:      "Private Author",
+		ItemURL:     "https://example.com/channel",
+		PrivateFeed: true,
+		Format:      model.FormatVideo,
+		Episodes: []*model.Episode{{
+			ID:          "private-1",
+			Status:      model.EpisodeDownloaded,
+			Title:       "Private Episode",
+			Description: "Private episode description",
+			Summary:     "Private episode summary",
+			Duration:    125,
+			Size:        2048,
+		}},
+	}
+
+	cfg := Config{ID: "private", Format: model.FormatVideo}
+	podcast, err := Build(context.Background(), &feedModel, &cfg, "https://podsync.domain.com")
+	require.NoError(t, err)
+	xmlText, err := RenderXML(podcast, feedModel.Episodes)
+	require.NoError(t, err)
+
+	golden, err := os.ReadFile("testdata/rss_channel_private.golden.xml")
+	require.NoError(t, err)
+	normalize := func(value string) string {
+		pubDateRe := regexp.MustCompile(`<pubDate>.*?</pubDate>`)
+		lastBuildRe := regexp.MustCompile(`<lastBuildDate>.*?</lastBuildDate>`)
+		value = strings.ReplaceAll(value, "\r\n", "\n")
+		value = pubDateRe.ReplaceAllString(value, `<pubDate>__PUBDATE__</pubDate>`)
+		value = lastBuildRe.ReplaceAllString(value, `<lastBuildDate>__LASTBUILD__</lastBuildDate>`)
+		value = strings.TrimSpace(value)
+		return value
+	}
+	assert.Equal(t, normalize(string(golden)), normalize(xmlText))
+}
+
+func TestRenderXMLMatchesSubtitlelessGolden(t *testing.T) {
+	feedModel := model.Feed{
+		Format: model.FormatAudio,
+		Episodes: []*model.Episode{{
+			ID:          "subless",
+			Status:      model.EpisodeDownloaded,
+			Title:       "Subtitleless Episode",
+			Subtitle:    "This should not be emitted",
+			Description: "A clean description",
+			Duration:    60,
+			Size:        1000,
+		}},
+	}
+
+	cfg := Config{ID: "subless", Format: model.FormatAudio}
+	podcast, err := Build(context.Background(), &feedModel, &cfg, "https://podsync.domain.com")
+	require.NoError(t, err)
+	xmlText, err := RenderXML(podcast, feedModel.Episodes)
+	require.NoError(t, err)
+	assert.NotContains(t, xmlText, `<itunes:subtitle>`)
+	assert.Contains(t, xmlText, `<title><![CDATA[Subtitleless Episode]]></title>`)
+	assert.Contains(t, xmlText, `<description><![CDATA[A clean description]]></description>`)
 }

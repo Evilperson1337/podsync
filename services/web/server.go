@@ -86,50 +86,82 @@ func New(cfg Config, storage http.FileSystem, database db.Storage) *Server {
 }
 
 type HealthStatus struct {
-	Status         string    `json:"status"`
-	Timestamp      time.Time `json:"timestamp"`
-	FailedEpisodes int       `json:"failed_episodes,omitempty"`
-	Message        string    `json:"message,omitempty"`
+	Status            string         `json:"status"`
+	Timestamp         time.Time      `json:"timestamp"`
+	FailedEpisodes    int            `json:"failed_episodes,omitempty"`
+	FailureCategories map[string]int `json:"failure_categories,omitempty"`
+	Message           string         `json:"message,omitempty"`
 }
 
 func (s *Server) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	// Check for recent download failures within the last 24 hours
-	failedCount := 0
-	cutoffTime := time.Now().Add(-24 * time.Hour)
-
-	// Walk through all feeds to count recent failures
-	err := s.db.WalkFeeds(ctx, func(feed *model.Feed) error {
-		return s.db.WalkEpisodes(ctx, feed.ID, func(episode *model.Episode) error {
-			if episode.Status == model.EpisodeError && episode.PubDate.After(cutoffTime) {
-				failedCount++
-			}
-			return nil
-		})
-	})
-
 	w.Header().Set("Content-Type", "application/json")
-
-	status := HealthStatus{
-		Timestamp: time.Now(),
-	}
+	status, err := s.healthStatus(r)
 
 	if err != nil {
 		log.WithError(err).Error("health check database error")
 		status.Status = "unhealthy"
 		status.Message = "database error during health check"
 		w.WriteHeader(http.StatusServiceUnavailable)
-	} else if failedCount > 0 {
-		status.Status = "unhealthy"
-		status.FailedEpisodes = failedCount
-		status.Message = fmt.Sprintf("found %d failed downloads in the last 24 hours", failedCount)
+	} else if status.Status == "unhealthy" {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
-		status.Status = "healthy"
-		status.Message = "no recent download failures detected"
 		w.WriteHeader(http.StatusOK)
 	}
 
 	json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) healthStatus(r *http.Request) (HealthStatus, error) {
+	ctx := r.Context()
+	if summary, err := s.db.GetHealthSummary(ctx); err == nil && time.Since(summary.ComputedAt) < 5*time.Second {
+		log.WithFields(log.Fields{"computed_at": summary.ComputedAt, "failed_episodes": summary.FailedEpisodes}).Debug("using persisted health summary cache")
+		return HealthStatus{
+			Status:            summary.Status,
+			Timestamp:         time.Now(),
+			FailedEpisodes:    summary.FailedEpisodes,
+			FailureCategories: summary.FailureCategories,
+			Message:           summary.Message,
+		}, nil
+	}
+
+	failedCount := 0
+	failureCategories := map[string]int{}
+	cutoffTime := time.Now().Add(-24 * time.Hour)
+	err := s.db.WalkFeeds(ctx, func(feed *model.Feed) error {
+		return s.db.WalkEpisodes(ctx, feed.ID, func(episode *model.Episode) error {
+			if episode.Status == model.EpisodeError && !episode.LastErrorAt.IsZero() && episode.LastErrorAt.After(cutoffTime) {
+				failedCount++
+				category := episode.FailureCategory
+				if category == "" {
+					category = model.FailureCategoryUnknown
+				}
+				failureCategories[category]++
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return HealthStatus{Timestamp: time.Now()}, err
+	}
+
+	status := HealthStatus{Timestamp: time.Now()}
+	if failedCount > 0 {
+		status.Status = "unhealthy"
+		status.FailedEpisodes = failedCount
+		status.FailureCategories = failureCategories
+		status.Message = fmt.Sprintf("found %d failed downloads in the last 24 hours", failedCount)
+	} else {
+		status.Status = "healthy"
+		status.Message = "no recent download failures detected"
+	}
+	log.WithFields(log.Fields{"status": status.Status, "failed_episodes": status.FailedEpisodes, "failure_categories": status.FailureCategories}).Info("refreshing persisted health summary")
+	_ = s.db.SetHealthSummary(ctx, &model.HealthSummary{
+		Status:            status.Status,
+		Timestamp:         status.Timestamp,
+		FailedEpisodes:    status.FailedEpisodes,
+		FailureCategories: status.FailureCategories,
+		Message:           status.Message,
+		ComputedAt:        time.Now(),
+	})
+	return status, nil
 }

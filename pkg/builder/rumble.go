@@ -32,11 +32,13 @@ const (
 	rumbleRequestJitterMax = 500 * time.Millisecond
 	rumbleRetryAttempts    = 3
 	rumbleCacheTTL         = 10 * time.Minute
+	rumbleCacheMaxEntries  = 16
 )
 
 type rumbleCacheEntry struct {
 	items     []*model.Episode
 	fetchedAt time.Time
+	lastUsed  time.Time
 }
 
 type rumbleItem struct {
@@ -77,22 +79,7 @@ func (r *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fee
 		return nil, errors.New("unsupported provider for rumble builder")
 	}
 
-	feedModel := &model.Feed{
-		ItemID:          info.ItemID,
-		Provider:        info.Provider,
-		LinkType:        info.LinkType,
-		Format:          cfg.Format,
-		Quality:         cfg.Quality,
-		CoverArtQuality: cfg.Custom.CoverArtQuality,
-		PageSize:        cfg.PageSize,
-		PlaylistSort:    cfg.PlaylistSort,
-		PrivateFeed:     cfg.PrivateFeed,
-		UpdatedAt:       time.Now().UTC(),
-	}
-
-	if feedModel.PageSize == 0 {
-		feedModel.PageSize = model.DefaultPageSize
-	}
+	feedModel := newFeedModel(info, cfg)
 
 	logger := log.WithFields(log.Fields{
 		"provider":  "rumble",
@@ -101,6 +88,7 @@ func (r *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fee
 		"page_size": feedModel.PageSize,
 	})
 	logger.Info("starting rumble scrape")
+	logger.WithFields(log.Fields{"cache_entries": r.cacheEntryCount(), "cache_limit": rumbleCacheMaxEntries}).Debug("rumble cache state")
 
 	feedURL, fallbackURL := rumbleChannelURL(info.ItemID, info.LinkType)
 	known := r.cachedGUIDs(r.cacheKey(info.ItemID, info.LinkType))
@@ -477,12 +465,14 @@ func (r *RumbleBuilder) cacheKey(channel string, linkType model.Type) string {
 
 func (r *RumbleBuilder) cachedGUIDs(key string) map[string]struct{} {
 	result := map[string]struct{}{}
-	r.cacheLock.RLock()
-	defer r.cacheLock.RUnlock()
+	r.cacheLock.Lock()
+	defer r.cacheLock.Unlock()
 	entry, ok := r.cache[key]
 	if !ok {
 		return result
 	}
+	entry.lastUsed = time.Now().UTC()
+	r.cache[key] = entry
 	for _, item := range entry.items {
 		if item != nil && item.ID != "" {
 			result[item.ID] = struct{}{}
@@ -517,12 +507,14 @@ func (r *RumbleBuilder) dedupeWithOtherFeed(channel string, linkType model.Type,
 }
 
 func (r *RumbleBuilder) getCached(key string) ([]*model.Episode, bool, bool) {
-	r.cacheLock.RLock()
-	defer r.cacheLock.RUnlock()
+	r.cacheLock.Lock()
+	defer r.cacheLock.Unlock()
 	entry, ok := r.cache[key]
 	if !ok {
 		return nil, false, false
 	}
+	entry.lastUsed = time.Now().UTC()
+	r.cache[key] = entry
 	stale := time.Since(entry.fetchedAt) > rumbleCacheTTL
 	return entry.items, stale, true
 }
@@ -530,7 +522,37 @@ func (r *RumbleBuilder) getCached(key string) ([]*model.Episode, bool, bool) {
 func (r *RumbleBuilder) setCached(key string, items []*model.Episode) {
 	r.cacheLock.Lock()
 	defer r.cacheLock.Unlock()
-	r.cache[key] = rumbleCacheEntry{items: items, fetchedAt: time.Now().UTC()}
+	now := time.Now().UTC()
+	r.cache[key] = rumbleCacheEntry{items: items, fetchedAt: now, lastUsed: now}
+	r.evictCacheLocked()
+}
+
+func (r *RumbleBuilder) cacheEntryCount() int {
+	r.cacheLock.RLock()
+	defer r.cacheLock.RUnlock()
+	return len(r.cache)
+}
+
+func (r *RumbleBuilder) evictCacheLocked() {
+	for len(r.cache) > rumbleCacheMaxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for key, entry := range r.cache {
+			candidate := entry.lastUsed
+			if candidate.IsZero() {
+				candidate = entry.fetchedAt
+			}
+			if oldestKey == "" || candidate.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = candidate
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(r.cache, oldestKey)
+		log.WithFields(log.Fields{"cache_key": oldestKey, "cache_entries": len(r.cache)}).Debug("rumble cache entry evicted")
+	}
 }
 
 func (r *RumbleBuilder) waitForRateLimit() {

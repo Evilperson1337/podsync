@@ -22,15 +22,7 @@ func (t *TwitchBuilder) Build(_ctx context.Context, cfg *feed.Config) (*model.Fe
 		return nil, errors.Wrap(err, "failed to parse URL")
 	}
 
-	feed := &model.Feed{
-		ItemID:    info.ItemID,
-		Provider:  info.Provider,
-		LinkType:  info.LinkType,
-		Format:    cfg.Format,
-		Quality:   cfg.Quality,
-		PageSize:  cfg.PageSize,
-		UpdatedAt: time.Now().UTC(),
-	}
+	feed := newFeedModel(info, cfg)
 
 	if info.LinkType == model.TypeUser {
 		users, err := t.client.GetUsers(&helix.UsersParams{

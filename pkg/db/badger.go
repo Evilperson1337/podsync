@@ -20,6 +20,8 @@ const (
 	feedPath      = "feed/%s"
 	episodePrefix = "episode/%s/"
 	episodePath   = "episode/%s/%s" // FeedID + EpisodeID
+	healthPath    = "summary/health"
+	pubPath       = "summary/publication"
 )
 
 // BadgerConfig represents BadgerDB configuration parameters
@@ -229,6 +231,40 @@ func (b *Badger) DeleteEpisode(feedID, episodeID string) error {
 func (b *Badger) WalkEpisodes(ctx context.Context, feedID string, cb func(episode *model.Episode) error) error {
 	return b.db.View(func(txn *badger.Txn) error {
 		return b.walkEpisodes(txn, feedID, cb)
+	})
+}
+
+func (b *Badger) GetHealthSummary(_ context.Context) (*model.HealthSummary, error) {
+	var summary model.HealthSummary
+	err := b.db.View(func(txn *badger.Txn) error {
+		return b.getObj(txn, b.getKey(healthPath), &summary)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &summary, nil
+}
+
+func (b *Badger) SetHealthSummary(_ context.Context, summary *model.HealthSummary) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		return b.setObj(txn, b.getKey(healthPath), summary, true)
+	})
+}
+
+func (b *Badger) GetPublicationSummary(_ context.Context) (*model.PublicationSummary, error) {
+	var summary model.PublicationSummary
+	err := b.db.View(func(txn *badger.Txn) error {
+		return b.getObj(txn, b.getKey(pubPath), &summary)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &summary, nil
+}
+
+func (b *Badger) SetPublicationSummary(_ context.Context, summary *model.PublicationSummary) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		return b.setObj(txn, b.getKey(pubPath), summary, true)
 	})
 }
 

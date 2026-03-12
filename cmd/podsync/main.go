@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jessevdk/go-flags"
+	"github.com/mxpv/podsync/pkg/audiosig"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/services/update"
@@ -107,6 +110,10 @@ func main() {
 		}
 	}
 
+	if err := validateRuntimeDependencies(ctx, cfg); err != nil {
+		log.WithError(err).Fatal("startup validation failed")
+	}
+
 	downloader, err := ytdl.New(ctx, cfg.Downloader)
 	if err != nil {
 		log.WithError(err).Fatal("youtube-dl error")
@@ -150,10 +157,13 @@ func main() {
 	}
 
 	log.Debug("creating update manager")
-	manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, downloader, database, storage)
+	manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, cfg.Signatures.RootDir, downloader, database, storage)
 	if err != nil {
 		log.WithError(err).Fatal("failed to create updater")
 	}
+	manager.SetOPMLPublisher(update.NewOPMLPublisher(func(buildCtx context.Context) error {
+		return manager.BuildOPMLNow(buildCtx)
+	}, time.Second))
 
 	// In Headless mode, do one round of feed updates and quit
 	if opts.Headless {
@@ -162,17 +172,17 @@ func main() {
 				log.WithError(err).Errorf("failed to update feed: %s", _feed.URL)
 			}
 		}
+		if err := manager.FlushOPML(ctx); err != nil {
+			log.WithError(err).Error("failed to flush opml publisher")
+		}
 		return
 	}
 
-	// Queue of feeds to update
-	updates := make(chan *feed.Config, 16)
-	defer close(updates)
-
+	var scheduler *update.Scheduler
 	group, ctx := errgroup.WithContext(ctx)
 	defer func() {
-		if err := group.Wait(); err != nil && (err != context.Canceled && err != http.ErrServerClosed) {
-			log.WithError(err).Error("wait error")
+		if err := manager.FlushOPML(context.Background()); err != nil {
+			log.WithError(err).Error("failed to flush opml publisher")
 		}
 		log.Info("gracefully stopped")
 	}()
@@ -180,22 +190,8 @@ func main() {
 	// Create Cron
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
 	m := make(map[string]cron.EntryID)
-
-	// Run updates listener
-	group.Go(func() error {
-		for {
-			select {
-			case _feed := <-updates:
-				if err := manager.Update(ctx, _feed); err != nil {
-					log.WithError(err).Errorf("failed to update feed: %s", _feed.URL)
-				} else {
-					log.Infof("next update of %s: %s", _feed.ID, c.Entry(m[_feed.ID]).Next)
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	})
+	scheduler = update.NewScheduler(manager, 4, 64)
+	scheduler.Start(ctx)
 
 	// Run cron scheduler
 	group.Go(func() error {
@@ -210,8 +206,17 @@ func main() {
 			}
 			cronFeed := _feed
 			if cronID, err = c.AddFunc(cronFeed.CronSchedule, func() {
-				log.Debugf("adding %q to update queue", cronFeed.ID)
-				updates <- cronFeed
+				if !scheduler.Enqueue(cronFeed) {
+					log.WithFields(log.Fields{
+						"feed_id":     cronFeed.ID,
+						"queue_stats": scheduler.Stats(),
+					}).Debug("feed update request deduplicated")
+					return
+				}
+				log.WithFields(log.Fields{
+					"feed_id":     cronFeed.ID,
+					"queue_stats": scheduler.Stats(),
+				}).Debug("feed update requested")
 			}); err != nil {
 				log.WithError(err).Fatalf("can't create cron task for feed: %s", cronFeed.ID)
 			}
@@ -223,7 +228,16 @@ func main() {
 			// This prevents unwanted updates when using fixed schedules in Docker deployments
 			// If --no-banner is used (Docker default), still perform an initial update
 			if !hasExplicitCronSchedule || opts.NoBanner {
-				updates <- cronFeed
+				log.WithFields(log.Fields{
+					"feed_id":               cronFeed.ID,
+					"has_explicit_schedule": hasExplicitCronSchedule,
+					"no_banner":             opts.NoBanner,
+				}).Info("attempting startup enqueue")
+				enqueued := scheduler.Enqueue(cronFeed)
+				log.WithFields(log.Fields{
+					"feed_id":  cronFeed.ID,
+					"enqueued": enqueued,
+				}).Info("startup enqueue result")
 			}
 		}
 
@@ -278,4 +292,41 @@ func main() {
 			}
 		}
 	})
+
+	if err := group.Wait(); err != nil && (err != context.Canceled && err != http.ErrServerClosed) {
+		log.WithError(err).Error("wait error")
+	}
+	if scheduler != nil {
+		scheduler.Stop()
+	}
+}
+
+func validateRuntimeDependencies(ctx context.Context, cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	if requiresSignatureTooling(cfg) {
+		if err := audiosig.EnsureFFmpegAvailable(ctx); err != nil {
+			return err
+		}
+		if _, err := exec.LookPath("ffprobe"); err != nil {
+			return fmt.Errorf("ffprobe not found in PATH")
+		}
+	}
+	return nil
+}
+
+func requiresSignatureTooling(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if strings.TrimSpace(cfg.Signatures.RootDir) != "" || strings.TrimSpace(os.Getenv("PODSYNC_SIGNATURES_DIR")) != "" {
+		return true
+	}
+	for _, feedCfg := range cfg.Feeds {
+		if feedCfg != nil && feedCfg.Custom.SponsorBlockConfig().Enabled {
+			return true
+		}
+	}
+	return false
 }
