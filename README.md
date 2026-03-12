@@ -167,10 +167,67 @@ Podsync supports the following environment variables for configuration and API k
 | `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
 | `PODSYNC_TWITCH_API_KEY`     | Twitch API credentials in the format `CLIENT_ID:CLIENT_SECRET`, space-separated for multi | `id1:secret1 id2:secret2`                     |
 
-## 🚀 How to run
+## 🚀 Getting started
+
+### What to expect at startup
+
+When Podsync starts successfully in Docker, the first log lines usually only show process startup, dependency checks, database open, and the HTTP listener binding. A log like [`running listener at :8080`](cmd/podsync/main.go:258) means the service is up and waiting for scheduled work.
+
+Feed discovery does **not** necessarily produce an immediate burst of download logs at the exact moment the container starts. What happens next depends on your feed configuration:
+
+- If a feed has `cron_schedule` configured, Podsync registers that schedule and waits for it.
+- If a feed does **not** have `cron_schedule`, Podsync falls back to `update_period`.
+- The default `update_period` is 6 hours in [`pkg/model/defaults.go`](pkg/model/defaults.go:11).
+- In the Docker image, Podsync starts with [`--no-banner`](Dockerfile:30), and that path enqueues an initial update on startup in addition to scheduling future runs; this behavior is implemented in [`cmd/podsync/main.go`](cmd/podsync/main.go:230).
+
+If you do not see any update activity after startup, the most common causes are:
+
+- the container is not actually using the `config.toml` file you think it is,
+- the config contains no active feeds,
+- provider API credentials are missing,
+- or your feeds are configured with a schedule you are not expecting.
+
+### 1. Create a minimal configuration
+
+You need a [`config.toml`](README.md) file that defines:
+
+- a web server port,
+- local storage,
+- API tokens if required by the provider,
+- and at least one feed under `[feeds]`.
+
+Minimal example:
+
+```toml
+[server]
+port = 8080
+
+[storage]
+  type = "local"
+
+  [storage.local]
+  data_dir = "/app/data"
+
+[tokens]
+youtube = "PASTE YOUR API KEY HERE"
+
+[feeds]
+  [feeds.example]
+  url = "https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ"
+  page_size = 5
+  update_period = "30m"
+```
+
+Notes:
+
+- `update_period = "30m"` is useful for testing because it is easy to reason about.
+- If you use `cron_schedule`, Podsync expects standard cron syntax as documented in [`docs/cron.md`](docs/cron.md).
+- The sample file in [`bin/config.toml`](bin/config.toml) is a fuller example, but many of its feeds use explicit cron schedules, which can make startup look idle if you expect immediate downloads.
+
+### 2. Run with Docker
 
 
-### Build and run as binary:
+#### Build and run as binary:
 
 Make sure you have created the file `config.toml`. Also note the location of the `data_dir`. Depending on the operating system, you may have to choose a different location since `/app/data` might be not writable.
 
@@ -181,12 +238,12 @@ $ make
 $ ./bin/podsync --config config.toml
 ```
 
-### 🐛 How to debug
+#### 🐛 How to debug
 
 Use the editor [Visual Studio Code](https://code.visualstudio.com/) and install the official [Go](https://marketplace.visualstudio.com/items?itemName=golang.go) extension. Afterwards you can execute "Run & Debug" ▶︎ "Debug Podsync" to debug the application. The required configuration is already prepared (see `.vscode/launch.json`).
 
 
-### 🐳 Run via Docker:
+#### 🐳 Run via Docker:
 
 ```
 $ docker pull ghcr.io/mxpv/podsync:latest
@@ -198,7 +255,24 @@ $ docker run \
     ghcr.io/mxpv/podsync:latest
 ```
 
-### 🐳 Run via Docker Compose:
+On Windows PowerShell, the same command usually looks like:
+
+```powershell
+docker run `
+  -p 8080:8080 `
+  -v ${PWD}/data:/app/data/ `
+  -v ${PWD}/db:/app/db/ `
+  -v ${PWD}/config.toml:/app/config.toml `
+  ghcr.io/mxpv/podsync:latest
+```
+
+Important details:
+
+- The container process looks for the config file at `/app/config.toml` by default via [`--config`](cmd/podsync/main.go:31).
+- If you mount your config somewhere else, set `PODSYNC_CONFIG_PATH` or pass `--config /path/to/config.toml`.
+- Persist both `/app/data` and `/app/db` so Podsync can keep downloaded media and metadata between restarts.
+
+#### 🐳 Run via Docker Compose:
 
 ```
 $ cat docker-compose.yml
@@ -215,6 +289,74 @@ services:
 
 $ docker compose up
 ```
+
+### 3. Verify that the config is actually loaded
+
+If the container starts but no feeds seem to run, first verify that your config is mounted where Podsync expects it:
+
+- default config path: `/app/config.toml`
+- default Docker working directory: `/app`
+- default container command: [`/app/podsync --no-banner`](Dockerfile:29)
+
+If you are unsure, run the container with an explicit config path:
+
+```bash
+docker run \
+  -p 8080:8080 \
+  -v $(pwd)/data:/app/data/ \
+  -v $(pwd)/db:/app/db/ \
+  -v $(pwd)/config.toml:/app/config.toml \
+  ghcr.io/mxpv/podsync:latest \
+  --no-banner --config /app/config.toml --debug
+```
+
+The [`--debug`](cmd/podsync/main.go:33) flag is helpful because feed scheduling and queueing logs are emitted at debug level in [`cmd/podsync/main.go`](cmd/podsync/main.go:211).
+
+### 4. Understand why feeds may look idle
+
+Podsync schedules feeds in [`cmd/podsync/main.go`](cmd/podsync/main.go:203):
+
+- `cron_schedule` takes precedence when present.
+- otherwise Podsync converts `update_period` into an `@every ...` schedule.
+
+Examples:
+
+```toml
+[feeds]
+  [feeds.fast_test]
+  url = "https://www.youtube.com/@LinusTechTips/videos"
+  update_period = "15m"
+```
+
+```toml
+[feeds]
+  [feeds.daily_job]
+  url = "https://www.youtube.com/@LinusTechTips/videos"
+  cron_schedule = "30 12 * * *"
+```
+
+For first-run testing, prefer a short `update_period` and avoid a daily `cron_schedule` until you confirm everything is working.
+
+### 5. Quick troubleshooting checklist
+
+If startup logs stop after `running listener at :8080`, check the following:
+
+1. **Config mount**: make sure your host file is really mounted to `/app/config.toml`.
+2. **Feeds exist**: confirm your file has at least one section under `[feeds]`.
+3. **Tokens exist**: YouTube and Vimeo feeds generally require API credentials under `[tokens]` or environment variables documented in [`README.md`](README.md:158).
+4. **Schedule choice**: if you set `cron_schedule`, Podsync may be waiting for the next cron tick.
+5. **Use debug logs**: start with `--debug` to see schedule registration and queue activity.
+6. **Check persisted output**: successful runs should populate `/app/data` and metadata under `/app/db`.
+
+### 6. First-run recommendation
+
+For the easiest first test:
+
+- use one feed,
+- set `update_period = "15m"` or `"30m"`,
+- enable debug logging,
+- mount [`config.toml`](README.md), [`data`](data), and [`db`](db) explicitly,
+- and confirm that the feed URL and API key are valid before adding more feeds.
 
 ## 📦 How to make a release
 

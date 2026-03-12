@@ -4,6 +4,7 @@ import (
 	"context"
 	"expvar"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,7 +52,7 @@ func NewScheduler(updater FeedUpdater, workers int, queueSize int) *Scheduler {
 	if queueSize < workers {
 		queueSize = workers
 	}
-	return &Scheduler{
+	s := &Scheduler{
 		updater:  updater,
 		workers:  workers,
 		queue:    make(chan *feed.Config, queueSize),
@@ -61,9 +62,12 @@ func NewScheduler(updater FeedUpdater, workers int, queueSize int) *Scheduler {
 			model.ProviderRumble: make(chan struct{}, 1),
 		},
 	}
+	log.WithFields(log.Fields{"scheduler_ptr": fmt.Sprintf("%p", s), "workers": workers, "queue_size": queueSize, "stopping": s.stopping}).Info("scheduler created")
+	return s
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
+	log.WithFields(log.Fields{"scheduler_ptr": fmt.Sprintf("%p", s), "stopping": s.stopping}).Info("scheduler starting workers")
 	for i := 0; i < s.workers; i++ {
 		s.wg.Add(1)
 		go s.worker(ctx, i+1)
@@ -73,6 +77,8 @@ func (s *Scheduler) Start(ctx context.Context) {
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	if !s.stopping {
+		log.WithFields(log.Fields{"scheduler_ptr": fmt.Sprintf("%p", s)}).Info("scheduler stop requested")
+		log.Debug(string(debug.Stack()))
 		s.stopping = true
 		close(s.queue)
 	}
@@ -82,6 +88,7 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) Enqueue(cfg *feed.Config) bool {
 	if cfg == nil {
+		log.Info("skipping update enqueue because feed config is nil")
 		return false
 	}
 	metricEnqueueRequests.Add(1)
@@ -90,16 +97,17 @@ func (s *Scheduler) Enqueue(cfg *feed.Config) bool {
 	defer s.mu.Unlock()
 
 	if s.stopping {
+		log.WithFields(log.Fields{"feed_id": cfg.ID, "scheduler_ptr": fmt.Sprintf("%p", s)}).Info("skipping update enqueue because scheduler is stopping")
 		return false
 	}
 	if _, ok := s.inFlight[cfg.ID]; ok {
 		metricEnqueueDropped.Add(1)
-		log.WithField("feed_id", cfg.ID).Debug("skipping update enqueue because feed is already running")
+		log.WithField("feed_id", cfg.ID).Info("skipping update enqueue because feed is already running")
 		return false
 	}
 	if _, ok := s.enqueued[cfg.ID]; ok {
 		metricEnqueueDropped.Add(1)
-		log.WithField("feed_id", cfg.ID).Debug("skipping update enqueue because feed is already queued")
+		log.WithField("feed_id", cfg.ID).Info("skipping update enqueue because feed is already queued")
 		return false
 	}
 

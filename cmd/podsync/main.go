@@ -178,13 +178,11 @@ func main() {
 		return
 	}
 
+	var scheduler *update.Scheduler
 	group, ctx := errgroup.WithContext(ctx)
 	defer func() {
 		if err := manager.FlushOPML(context.Background()); err != nil {
 			log.WithError(err).Error("failed to flush opml publisher")
-		}
-		if err := group.Wait(); err != nil && (err != context.Canceled && err != http.ErrServerClosed) {
-			log.WithError(err).Error("wait error")
 		}
 		log.Info("gracefully stopped")
 	}()
@@ -192,9 +190,8 @@ func main() {
 	// Create Cron
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
 	m := make(map[string]cron.EntryID)
-	scheduler := update.NewScheduler(manager, 4, 64)
+	scheduler = update.NewScheduler(manager, 4, 64)
 	scheduler.Start(ctx)
-	defer scheduler.Stop()
 
 	// Run cron scheduler
 	group.Go(func() error {
@@ -231,7 +228,16 @@ func main() {
 			// This prevents unwanted updates when using fixed schedules in Docker deployments
 			// If --no-banner is used (Docker default), still perform an initial update
 			if !hasExplicitCronSchedule || opts.NoBanner {
-				scheduler.Enqueue(cronFeed)
+				log.WithFields(log.Fields{
+					"feed_id":               cronFeed.ID,
+					"has_explicit_schedule": hasExplicitCronSchedule,
+					"no_banner":             opts.NoBanner,
+				}).Info("attempting startup enqueue")
+				enqueued := scheduler.Enqueue(cronFeed)
+				log.WithFields(log.Fields{
+					"feed_id":  cronFeed.ID,
+					"enqueued": enqueued,
+				}).Info("startup enqueue result")
 			}
 		}
 
@@ -286,6 +292,13 @@ func main() {
 			}
 		}
 	})
+
+	if err := group.Wait(); err != nil && (err != context.Canceled && err != http.ErrServerClosed) {
+		log.WithError(err).Error("wait error")
+	}
+	if scheduler != nil {
+		scheduler.Stop()
+	}
 }
 
 func validateRuntimeDependencies(ctx context.Context, cfg *Config) error {
