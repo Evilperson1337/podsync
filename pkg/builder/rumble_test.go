@@ -59,6 +59,25 @@ func TestParseRumbleListingLivestreams(t *testing.T) {
 	require.Equal(t, "v9done1", items[0].episode.ID)
 }
 
+func TestParseRumbleListingGridJSON(t *testing.T) {
+	fixture := filepath.Join("testdata", "rumble", "grid.html")
+	data, err := os.ReadFile(fixture)
+	require.NoError(t, err)
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(data)))
+	require.NoError(t, err)
+
+	builder := &RumbleBuilder{}
+	items, next, err := builder.parseListing(doc, "https://rumble.com/c/StevenCrowder/livestreams", model.TypeLivestreams, log.New())
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, "v7c1ij4", items[0].episode.ID)
+	require.Equal(t, "Breaking: SCOTUS Strikes Down Trump's Birthright Citizenship EO - As It Happened", items[0].episode.Title)
+	require.EqualValues(t, 6666, items[0].episode.Duration)
+	require.Equal(t, "https://rumble.com/v7c1ij4--colonizers-vigilantes-and-the-nancy-pelosi-school-of-stuff-lets-have-some-.html", items[0].episode.VideoURL)
+	require.Equal(t, "https://rumble.com/c/StevenCrowder/livestreams?page=2", next)
+}
+
 func TestParseDuration(t *testing.T) {
 	require.EqualValues(t, 754, parseDuration("12:34"))
 	require.EqualValues(t, 3723, parseDuration("1:02:03"))

@@ -53,6 +53,36 @@ type Manager struct {
 	publication *PublicationService
 }
 
+type FeedSyncSummary struct {
+	FeedID              string
+	FeedTitle           string
+	SourceItemsFound    int
+	NewItemsDiscovered  int
+	AlreadyKnown        int
+	Downloaded          int
+	ReusedExistingMedia int
+	Skipped             int
+	Excluded            int
+	Failed              int
+	GeneratedFeedItems  int
+	Duration            time.Duration
+}
+
+type feedDiscoverySummary struct {
+	SourceItemsFound   int
+	NewItemsDiscovered int
+	AlreadyKnown       int
+	FeedTitle          string
+}
+
+type downloadSummary struct {
+	Downloaded          int
+	ReusedExistingMedia int
+	Skipped             int
+	Excluded            int
+	Failed              int
+}
+
 func NewUpdater(
 	feeds map[string]*feed.Config,
 	keys map[model.Provider]feed.KeyProvider,
@@ -120,6 +150,11 @@ func (u *Manager) SetOPMLPublisher(publisher *OPMLPublisher) {
 }
 
 func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
+	_, err := u.UpdateWithSummary(ctx, feedConfig)
+	return err
+}
+
+func (u *Manager) UpdateWithSummary(ctx context.Context, feedConfig *feed.Config) (*FeedSyncSummary, error) {
 	logger := loggerWithExecution(ctx, log.Fields{
 		"feed_id": feedConfig.ID,
 		"format":  feedConfig.Format,
@@ -128,26 +163,38 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	logger.Infof("-> updating %s", feedConfig.URL)
 
 	started := time.Now()
+	summary := &FeedSyncSummary{FeedID: feedConfig.ID}
 	if err := u.reconcileFeedState(ctx, feedConfig); err != nil {
 		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
-		return errors.Wrap(err, "reconcile failed")
+		return summary, errors.Wrap(err, "reconcile failed")
 	}
 
-	if err := u.updateFeed(ctx, feedConfig); err != nil {
+	discovery, err := u.updateFeed(ctx, feedConfig)
+	if err != nil {
 		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
-		return errors.Wrap(err, "update failed")
+		return summary, errors.Wrap(err, "update failed")
 	}
+	summary.SourceItemsFound = discovery.SourceItemsFound
+	summary.NewItemsDiscovered = discovery.NewItemsDiscovered
+	summary.AlreadyKnown = discovery.AlreadyKnown
+	summary.FeedTitle = discovery.FeedTitle
 
 	// Fetch episodes for download
 	episodesToDownload, err := u.fetchEpisodes(ctx, feedConfig)
 	if err != nil {
-		return errors.Wrap(err, "fetch episodes failed")
+		return summary, errors.Wrap(err, "fetch episodes failed")
 	}
 
-	if err := u.downloadEpisodes(ctx, feedConfig, episodesToDownload); err != nil {
+	downloads, err := u.downloadEpisodes(ctx, feedConfig, episodesToDownload)
+	if err != nil {
 		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
-		return errors.Wrap(err, "download failed")
+		return summary, errors.Wrap(err, "download failed")
 	}
+	summary.Downloaded = downloads.Downloaded
+	summary.ReusedExistingMedia = downloads.ReusedExistingMedia
+	summary.Skipped = downloads.Skipped
+	summary.Excluded = downloads.Excluded
+	summary.Failed = downloads.Failed
 
 	if err := u.cleanup(ctx, feedConfig); err != nil {
 		log.WithError(err).Error("cleanup failed")
@@ -155,8 +202,9 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 
 	if err := u.buildXML(ctx, feedConfig); err != nil {
 		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
-		return errors.Wrap(err, "xml build failed")
+		return summary, errors.Wrap(err, "xml build failed")
 	}
+	summary.GeneratedFeedItems = u.countPublishableEpisodes(ctx, feedConfig.ID)
 
 	if u.shouldBuildOPML(feedConfig) {
 		if u.opml != nil {
@@ -164,15 +212,16 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 		} else {
 			if err := u.buildOPML(ctx); err != nil {
 				_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
-				return errors.Wrap(err, "opml build failed")
+				return summary, errors.Wrap(err, "opml build failed")
 			}
 		}
 	}
 
 	elapsed := time.Since(started)
+	summary.Duration = elapsed
 	_ = u.recordFeedRunSuccess(ctx, feedConfig.ID)
-	logger.WithField("duration", elapsed).Info("successfully updated feed")
-	return nil
+	logFeedSyncSummary(logger, summary)
+	return summary, nil
 }
 
 func (u *Manager) recordFeedRunSuccess(ctx context.Context, feedID string) error {
@@ -230,36 +279,58 @@ func (u *Manager) shouldBuildOPML(feedConfig *feed.Config) bool {
 }
 
 // updateFeed pulls API for new episodes and saves them to database
-func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error {
+func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) (feedDiscoverySummary, error) {
 	logger := loggerWithExecution(ctx, log.Fields{"feed_id": feedConfig.ID})
 	logger.Debug("building feed")
 	result, err := u.buildFeed(ctx, feedConfig)
 	if err != nil {
-		return err
+		return feedDiscoverySummary{}, err
 	}
+	discovery := feedDiscoverySummary{SourceItemsFound: len(result.Episodes), FeedTitle: result.Title}
 
 	logger.WithFields(log.Fields{"episodes": len(result.Episodes), "title": result.Title}).Debug("received episodes from builder")
 
 	if err := u.overlay.Apply(ctx, feedConfig, result); err != nil {
-		return err
+		return discovery, err
 	}
 
 	episodeSet := make(map[string]struct{})
+	knownEpisodes := make(map[string]*model.Episode)
 	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
+		knownEpisodes[episode.ID] = episode
 		if !model.IsEpisodePublishable(episode.Status) && episode.Status != model.EpisodeCleaned {
 			episodeSet[episode.ID] = struct{}{}
 		}
 		return nil
 	}); err != nil {
-		return err
+		return discovery, err
+	}
+
+	seen := make(map[string]struct{})
+	for _, episode := range result.Episodes {
+		if episode == nil {
+			continue
+		}
+		if _, ok := seen[episode.ID]; ok {
+			logger.WithFields(log.Fields{"episode_id": episode.ID, "title": episode.Title, "reason": model.ReasonDuplicateItem}).Debug("duplicate source item found")
+			continue
+		}
+		seen[episode.ID] = struct{}{}
+		if existing, ok := knownEpisodes[episode.ID]; ok {
+			discovery.AlreadyKnown++
+			logger.WithFields(itemLogFields(feedConfig, existing, model.ReasonMatchingGUIDExists, "matching source GUID already exists in cache", model.DecisionSourceCache)).Debug("Already known item")
+		} else {
+			discovery.NewItemsDiscovered++
+			logger.WithFields(itemLogFields(feedConfig, episode, "discovered", "new source item discovered", model.DecisionSourceAutomatic)).Debug("Discovered item")
+		}
 	}
 
 	if err := u.db.AddFeed(ctx, feedConfig.ID, result); err != nil {
-		return err
+		return discovery, err
 	}
 
 	if err := u.syncEpisodeMetadata(feedConfig.ID, result.Episodes); err != nil {
-		return err
+		return discovery, err
 	}
 
 	for _, episode := range result.Episodes {
@@ -268,15 +339,15 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 
 	// removing episodes that are no longer available in the feed and not downloaded or cleaned
 	for id := range episodeSet {
-		log.Infof("removing episode %q", id)
+		logger.WithField("episode_id", id).Info("Episode is no longer present in the source feed and has no downloaded media; removing it from Podsync's pending cache")
 		err := u.db.DeleteEpisode(feedConfig.ID, id)
 		if err != nil {
-			return err
+			return discovery, err
 		}
 	}
 
 	logger.Debug("successfully saved updates to storage")
-	return nil
+	return discovery, nil
 }
 
 func (u *Manager) syncEpisodeMetadata(feedID string, episodes []*model.Episode) error {
@@ -337,21 +408,37 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 		)
 		if episode.Status != model.EpisodeNew && episode.Status != model.EpisodeError && episode.Status != model.EpisodePlanned {
 			// File already downloaded
-			logger.Infof("skipping due to already downloaded")
+			logger.WithField("status", episode.Status).Infof("Video Name: %q already has status %q, so Podsync will not download it again", episode.Title, episode.Status)
 			return nil
 		}
 
-		if !matchFilters(episode, &feedConfig.Filters) {
+		filter := matchFiltersWithDecision(episode, &feedConfig.Filters)
+		if !filter.Matched {
+			_ = u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+				setEpisodeDecision(existing, filter.ReasonCode, filter.Reason, filter.Source, filter.Diagnostics)
+				return nil
+			})
+			logger.WithFields(itemLogFields(feedConfig, episode, filter.ReasonCode, filter.Reason, filter.Source)).Debug("Excluded item")
+			return nil
+		}
+
+		if strings.TrimSpace(episode.VideoURL) == "" {
+			_ = u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+				setEpisodeDecision(existing, model.ReasonMissingMediaURL, "episode has no downloadable media URL", model.DecisionSourceAutomatic, nil)
+				return nil
+			})
+			logger.WithFields(itemLogFields(feedConfig, episode, model.ReasonMissingMediaURL, "episode has no downloadable media URL", model.DecisionSourceAutomatic)).Debug("Skipped item")
 			return nil
 		}
 
 		// Limit the number of episodes downloaded at once
 		pageSize--
 		if pageSize < 0 {
+			logger.WithFields(log.Fields{"title": episode.Title, "page_size": feedConfig.PageSize}).Infof("Video Name: %q was not queued because this sync already reached the configured page_size limit of %d", episode.Title, feedConfig.PageSize)
 			return nil
 		}
 
-		logger.WithField("title", episode.Title).Debug("adding episode to download queue")
+		logger.WithField("title", episode.Title).Infof("Video Name: %q matched the feed rules and was queued for download", episode.Title)
 		if err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
 			existing.Status = model.EpisodePlanned
 			return nil
@@ -369,19 +456,19 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 	return downloadList, nil
 }
 
-func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config, downloadList []*model.Episode) error {
+func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config, downloadList []*model.Episode) (downloadSummary, error) {
 	var (
 		downloadCount = len(downloadList)
-		downloaded    = 0
+		summary       downloadSummary
 		feedID        = feedConfig.ID
 		hadFailures   bool
 	)
 
 	if downloadCount > 0 {
-		loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "download_count": downloadCount}).Info("episodes selected for download")
+		loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "download_count": downloadCount}).Infof("Podsync selected %d episode(s) from feed %q for download", downloadCount, feedID)
 	} else {
-		loggerWithExecution(ctx, log.Fields{"feed_id": feedID}).Info("no episodes to download")
-		return nil
+		loggerWithExecution(ctx, log.Fields{"feed_id": feedID}).Infof("No new episodes from feed %q need to be downloaded", feedID)
+		return summary, nil
 	}
 
 	// Download pending episodes
@@ -395,7 +482,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		// Check whether episode already exists
 		size, err := u.fs.Size(ctx, fmt.Sprintf("%s/%s", feedID, episodeName))
 		if err == nil {
-			logger.Infof("episode %q already exists on disk", episode.ID)
+			logger.WithFields(itemLogFields(feedConfig, episode, model.ReasonAlreadyDownloaded, "matching media file already exists", model.DecisionSourceCache)).WithField("media_path", fmt.Sprintf("%s/%s", feedID, episodeName)).Debug("Reused existing item")
 
 			// File already exists, update file status and disk size
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
@@ -404,30 +491,33 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				episode.LastError = ""
 				episode.LastErrorAt = time.Time{}
 				episode.FailureCategory = ""
+				setEpisodeDecision(episode, model.ReasonAlreadyDownloaded, "matching media file already exists", model.DecisionSourceCache, map[string]string{"media_path": fmt.Sprintf("%s/%s", feedID, episodeName), "size_bytes": fmt.Sprint(size)})
 				return nil
 			}); err != nil {
 				logger.WithError(err).Error("failed to update file info")
-				return err
+				return summary, err
 			}
 
+			summary.ReusedExistingMedia++
 			continue
 		} else if os.IsNotExist(err) {
 			// Will download, do nothing here
 		} else {
 			logger.WithError(err).Error("failed to stat file")
-			return err
+			return summary, err
 		}
 
 		// Download episode to disk
 		// We download the episode to a temp directory first to avoid downloading this file by clients
 		// while still being processed by youtube-dl (e.g. a file is being downloaded from YT or encoding in progress)
 
-		logger.Infof("! downloading episode %s", episode.VideoURL)
+		logger.Infof("Downloading Video Name: %q from %s", episode.Title, episode.VideoURL)
 		if err := u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
 			existing.Status = model.EpisodeDownloading
+			setEpisodeDecision(existing, "downloading", "episode selected for download", model.DecisionSourceAutomatic, nil)
 			return nil
 		}); err != nil {
-			return err
+			return summary, err
 		}
 		tempFile, err := u.downloader.Download(ctx, feedConfig, episode)
 		if err != nil {
@@ -435,7 +525,18 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			// We still need to generate XML, so just stop sending download requests and
 			// retry next time
 			if err == ytdl.ErrTooManyRequests {
-				logger.Warn("server responded with a 'Too Many Requests' error")
+				logger.WithFields(itemLogFields(feedConfig, episode, model.ReasonDownloadFailed, "provider rate limit returned too many requests", model.DecisionSourceError)).Warn("Failed item")
+				_ = u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+					episode.Status = model.EpisodeError
+					episode.LastError = err.Error()
+					episode.LastErrorAt = time.Now().UTC()
+					episode.RetryCount++
+					episode.FailureCategory = classifyFailure(err)
+					setEpisodeDecision(episode, model.ReasonDownloadFailed, "provider rate limit returned too many requests", model.DecisionSourceError, map[string]string{"last_error": err.Error()})
+					return nil
+				})
+				summary.Failed++
+				hadFailures = true
 				break
 			}
 
@@ -462,11 +563,14 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				episode.LastErrorAt = time.Now().UTC()
 				episode.RetryCount++
 				episode.FailureCategory = classifyFailure(err)
+				setEpisodeDecision(episode, model.ReasonDownloadFailed, "episode download failed", model.DecisionSourceError, map[string]string{"last_error": err.Error(), "attempts": fmt.Sprint(episode.RetryCount)})
 				return nil
 			}); err != nil {
-				return err
+				return summary, err
 			}
+			logger.WithFields(itemLogFields(feedConfig, episode, model.ReasonDownloadFailed, "episode download failed", model.DecisionSourceError)).WithError(err).Debug("Failed item")
 			hadFailures = true
+			summary.Failed++
 
 			continue
 		}
@@ -477,7 +581,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			return nil
 		}); err != nil {
 			tempFile.Close()
-			return err
+			return summary, err
 		}
 		trimmedReader, trimmedCleanup, err := u.trimEpisodeIfSignatureFound(ctx, feedConfig, episode, tempFile)
 		if err != nil {
@@ -489,11 +593,13 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				episode.LastErrorAt = time.Now().UTC()
 				episode.RetryCount++
 				episode.FailureCategory = model.FailureCategoryProcessing
+				setEpisodeDecision(episode, model.ReasonMediaProbeFailed, "signature trim or media processing failed", model.DecisionSourceError, map[string]string{"last_error": err.Error()})
 				return nil
 			}); err != nil {
-				return err
+				return summary, err
 			}
 			hadFailures = true
+			summary.Failed++
 			continue
 		}
 		if trimmedCleanup != nil {
@@ -518,9 +624,10 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				existing.LastErrorAt = time.Now().UTC()
 				existing.RetryCount++
 				existing.FailureCategory = model.FailureCategoryStorage
+				setEpisodeDecision(existing, model.ReasonStorageWriteFailed, "failed to write media to storage", model.DecisionSourceError, map[string]string{"last_error": err.Error()})
 				return nil
 			})
-			return err
+			return summary, err
 		}
 		if trimmedCleanup != nil {
 			trimmedCleanup()
@@ -545,7 +652,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 
 		// Update file status in database
 
-		logger.Infof("successfully downloaded file %q", episode.ID)
+		logger.Infof("Downloaded Video Name: %q to %s", episode.Title, fmt.Sprintf("%s/%s", feedID, episodeName))
 		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 			episode.Size = publishResult.Size
 			if processedDuration > 0 {
@@ -555,19 +662,21 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			episode.LastError = ""
 			episode.LastErrorAt = time.Time{}
 			episode.FailureCategory = ""
+			setEpisodeDecision(episode, "downloaded", "episode media downloaded successfully", model.DecisionSourceAutomatic, map[string]string{"media_path": fmt.Sprintf("%s/%s", feedID, episodeName), "size_bytes": fmt.Sprint(publishResult.Size)})
 			return nil
 		}); err != nil {
-			return err
+			return summary, err
 		}
+		logger.WithFields(itemLogFields(feedConfig, episode, "downloaded", "episode media downloaded successfully", model.DecisionSourceAutomatic)).WithFields(log.Fields{"output": fmt.Sprintf("%s/%s", feedID, episodeName), "size": publishResult.Size, "duration_seconds": processedDuration}).Debug("Downloaded item")
 
-		downloaded++
+		summary.Downloaded++
 	}
 
-	loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "downloaded": downloaded}).Info("download stage completed")
+	loggerWithExecution(ctx, log.Fields{"feed_id": feedID, "downloaded": summary.Downloaded, "reused_existing_media": summary.ReusedExistingMedia, "failed": summary.Failed}).Infof("Download stage completed for feed %q: downloaded=%d reused_existing_media=%d failed=%d", feedID, summary.Downloaded, summary.ReusedExistingMedia, summary.Failed)
 	if hadFailures {
 		_ = u.recordFeedRunFailure(ctx, feedID, errors.New("one or more episode downloads failed"))
 	}
-	return nil
+	return summary, nil
 }
 
 func (u *Manager) buildXML(ctx context.Context, feedConfig *feed.Config) error {
@@ -679,6 +788,7 @@ func (u *Manager) reconcileFeedState(ctx context.Context, feedConfig *feed.Confi
 				existing.LastErrorAt = time.Now().UTC()
 				existing.RetryCount++
 				existing.FailureCategory = model.FailureCategoryUnknown
+				setEpisodeDecision(existing, model.ReasonRecoveredInterruptedRun, "recovered from interrupted update", model.DecisionSourceError, nil)
 				return nil
 			})
 		default:
@@ -693,6 +803,55 @@ func (u *Manager) reconcileFeedState(ctx context.Context, feedConfig *feed.Confi
 		logger.WithField("reconciled_episodes", updated).Warn("reconciled incomplete episode states before update")
 	}
 	return nil
+}
+
+func (u *Manager) countPublishableEpisodes(ctx context.Context, feedID string) int {
+	count := 0
+	_ = u.db.WalkEpisodes(ctx, feedID, func(episode *model.Episode) error {
+		if model.IsEpisodePublishable(episode.Status) {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+func setEpisodeDecision(episode *model.Episode, reasonCode, reason, source string, diagnostics map[string]string) {
+	episode.ReasonCode = reasonCode
+	episode.Reason = reason
+	episode.DecisionSource = source
+	episode.ProcessedAt = time.Now().UTC()
+	episode.Diagnostics = diagnostics
+}
+
+func itemLogFields(feedConfig *feed.Config, episode *model.Episode, reasonCode, reason, source string) log.Fields {
+	fields := log.Fields{"feed_id": feedConfig.ID, "source_url": feedConfig.URL, "reason": reasonCode, "reason_message": reason, "decision_source": source}
+	if episode != nil {
+		fields["guid"] = episode.ID
+		fields["title"] = episode.Title
+		fields["published_at"] = episode.PubDate
+		if episode.VideoURL != "" {
+			fields["media_url"] = episode.VideoURL
+		}
+	}
+	return fields
+}
+
+func logFeedSyncSummary(logger log.FieldLogger, summary *FeedSyncSummary) {
+	logger.WithFields(log.Fields{
+		"feed_id":               summary.FeedID,
+		"feed_title":            summary.FeedTitle,
+		"source_items_found":    summary.SourceItemsFound,
+		"new_items_discovered":  summary.NewItemsDiscovered,
+		"already_known":         summary.AlreadyKnown,
+		"downloaded":            summary.Downloaded,
+		"reused_existing_media": summary.ReusedExistingMedia,
+		"skipped":               summary.Skipped,
+		"excluded":              summary.Excluded,
+		"failed":                summary.Failed,
+		"generated_feed_items":  summary.GeneratedFeedItems,
+		"duration":              summary.Duration,
+	}).Info("Sync completed for feed")
 }
 
 func classifyFailure(err error) string {

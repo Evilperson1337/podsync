@@ -31,31 +31,36 @@ const (
 
 type Episode struct {
 	// ID of episode
-	ID              string        `json:"id"`
-	Title           string        `json:"title"`
-	Subtitle        string        `json:"subtitle,omitempty"`
-	Description     string        `json:"description"`
-	Summary         string        `json:"summary,omitempty"`
-	Thumbnail       string        `json:"thumbnail"`
-	Link            string        `json:"link,omitempty"`
-	Author          string        `json:"author,omitempty"`
-	Keywords        string        `json:"keywords,omitempty"`
-	Explicit        *bool         `json:"explicit,omitempty"`
-	Duration        int64         `json:"duration"`
-	VideoURL        string        `json:"video_url"`
-	PubDate         time.Time     `json:"pub_date"`
-	Size            int64         `json:"size"`
-	Season          int           `json:"season,omitempty"`
-	EpisodeNumber   int           `json:"episode_number,omitempty"`
-	EpisodeType     string        `json:"episode_type,omitempty"`
-	Order           string        `json:"order"`
-	OrderSource     string        `json:"order_source,omitempty"`
-	MetadataSource  string        `json:"metadata_source,omitempty"`
-	Status          EpisodeStatus `json:"status"` // Workflow status
-	LastError       string        `json:"last_error,omitempty"`
-	LastErrorAt     time.Time     `json:"last_error_at,omitempty"`
-	RetryCount      int           `json:"retry_count,omitempty"`
-	FailureCategory string        `json:"failure_category,omitempty"`
+	ID              string            `json:"id"`
+	Title           string            `json:"title"`
+	Subtitle        string            `json:"subtitle,omitempty"`
+	Description     string            `json:"description"`
+	Summary         string            `json:"summary,omitempty"`
+	Thumbnail       string            `json:"thumbnail"`
+	Link            string            `json:"link,omitempty"`
+	Author          string            `json:"author,omitempty"`
+	Keywords        string            `json:"keywords,omitempty"`
+	Explicit        *bool             `json:"explicit,omitempty"`
+	Duration        int64             `json:"duration"`
+	VideoURL        string            `json:"video_url"`
+	PubDate         time.Time         `json:"pub_date"`
+	Size            int64             `json:"size"`
+	Season          int               `json:"season,omitempty"`
+	EpisodeNumber   int               `json:"episode_number,omitempty"`
+	EpisodeType     string            `json:"episode_type,omitempty"`
+	Order           string            `json:"order"`
+	OrderSource     string            `json:"order_source,omitempty"`
+	MetadataSource  string            `json:"metadata_source,omitempty"`
+	Status          EpisodeStatus     `json:"status"` // Workflow status
+	LastError       string            `json:"last_error,omitempty"`
+	LastErrorAt     time.Time         `json:"last_error_at,omitempty"`
+	RetryCount      int               `json:"retry_count,omitempty"`
+	FailureCategory string            `json:"failure_category,omitempty"`
+	ReasonCode      string            `json:"reason_code,omitempty"`
+	Reason          string            `json:"reason,omitempty"`
+	DecisionSource  string            `json:"decision_source,omitempty"`
+	ProcessedAt     time.Time         `json:"processed_at,omitempty"`
+	Diagnostics     map[string]string `json:"diagnostics,omitempty"`
 }
 
 type Feed struct {
@@ -106,6 +111,35 @@ const (
 	FailureCategoryStorage    = "storage"
 	FailureCategoryHook       = "hook"
 	FailureCategoryUnknown    = "unknown"
+)
+
+const (
+	ReasonAlreadyDownloaded       = "already_downloaded"
+	ReasonAlreadyInFeed           = "already_in_feed"
+	ReasonMatchingGUIDExists      = "matching_guid_exists"
+	ReasonMissingMediaURL         = "missing_media_url"
+	ReasonSourceUnavailable       = "source_unavailable"
+	ReasonDownloadFailed          = "download_failed"
+	ReasonPartialDownload         = "partial_download"
+	ReasonInvalidMetadata         = "invalid_metadata"
+	ReasonDurationBelowMinimum    = "duration_below_minimum"
+	ReasonDurationAboveMaximum    = "duration_above_maximum"
+	ReasonExcludedByConfig        = "excluded_by_config"
+	ReasonExcludedByPattern       = "excluded_by_pattern"
+	ReasonDuplicateItem           = "duplicate_item"
+	ReasonFilenameCollision       = "filename_collision"
+	ReasonFeedGenerationFailed    = "feed_generation_failed"
+	ReasonMediaProbeFailed        = "media_probe_failed"
+	ReasonTranscodeFailed         = "transcode_failed"
+	ReasonStorageWriteFailed      = "storage_write_failed"
+	ReasonRecoveredInterruptedRun = "recovered_interrupted_run"
+)
+
+const (
+	DecisionSourceConfiguration = "configuration"
+	DecisionSourceAutomatic     = "automatic_detection"
+	DecisionSourceCache         = "cache_state"
+	DecisionSourceError         = "error"
 )
 
 func IsEpisodePublishable(status EpisodeStatus) bool {
