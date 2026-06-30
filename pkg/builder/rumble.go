@@ -2,6 +2,7 @@ package builder
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -44,6 +45,24 @@ type rumbleCacheEntry struct {
 type rumbleItem struct {
 	episode *model.Episode
 	status  string
+}
+
+type rumbleGridPayload struct {
+	Items []rumbleGridItem `json:"items"`
+}
+
+type rumbleGridItem struct {
+	ObjectType       string          `json:"object_type"`
+	URL              string          `json:"url"`
+	RelativeURL      string          `json:"relative_url"`
+	Title            string          `json:"title"`
+	Duration         int64           `json:"duration"`
+	Thumb            string          `json:"thumb"`
+	UploadDate       string          `json:"upload_date"`
+	Live             bool            `json:"live"`
+	LivestreamStatus json.RawMessage `json:"livestream_status"`
+	LiveStreamedOn   string          `json:"live_streamed_on"`
+	PermalinkID      string          `json:"permalink_id"`
 }
 
 type RumbleBuilder struct {
@@ -333,10 +352,124 @@ func (r *RumbleBuilder) parseListing(doc *goquery.Document, pageURL string, link
 	}
 
 	if !found {
+		jsonItems := parseRumbleGridItems(doc, pageURL, linkType, logger)
+		if len(jsonItems) > 0 {
+			items = append(items, jsonItems...)
+			found = true
+		}
+	}
+
+	if !found {
 		logger.WithField("url", pageURL).Warn("no rumble items found in listing")
 	}
 
 	return items, extractNextPageURL(doc, pageURL), nil
+}
+
+func parseRumbleGridItems(doc *goquery.Document, pageURL string, linkType model.Type, logger log.FieldLogger) []*rumbleItem {
+	items := make([]*rumbleItem, 0)
+
+	doc.Find("rum-videos-grid script[type='application/json'], rum-videos-grid script[type=\"application/json\"]").Each(func(_ int, s *goquery.Selection) {
+		payloadText := strings.TrimSpace(s.Text())
+		if payloadText == "" {
+			return
+		}
+
+		var payload rumbleGridPayload
+		if err := json.Unmarshal([]byte(payloadText), &payload); err != nil {
+			logger.WithError(err).Debug("failed to parse rumble grid json")
+			return
+		}
+
+		for _, gridItem := range payload.Items {
+			item := parseRumbleGridItem(gridItem, pageURL, linkType, logger)
+			if item == nil || item.episode == nil {
+				continue
+			}
+			items = append(items, item)
+		}
+	})
+
+	return items
+}
+
+func parseRumbleGridItem(gridItem rumbleGridItem, pageURL string, linkType model.Type, logger log.FieldLogger) *rumbleItem {
+	if gridItem.ObjectType != "" && gridItem.ObjectType != "video" {
+		return nil
+	}
+
+	videoURL := strings.TrimSpace(gridItem.URL)
+	if videoURL == "" {
+		videoURL = strings.TrimSpace(gridItem.RelativeURL)
+	}
+	videoURL = toAbsoluteURL(pageURL, videoURL)
+
+	guid := extractRumbleGUID(videoURL)
+	if guid == "" && strings.TrimSpace(gridItem.PermalinkID) != "" {
+		guid = strings.TrimSpace(gridItem.PermalinkID)
+	}
+	if guid == "" {
+		return nil
+	}
+
+	pubDate, dateStatus := parseRumbleDate(firstNonEmpty(gridItem.UploadDate, gridItem.LiveStreamedOn))
+	if pubDate.IsZero() {
+		logger.WithField("guid", guid).Warn("rumble missing publish date, using scrape time")
+		pubDate = time.Now().UTC()
+	}
+
+	status := "complete"
+	if gridItem.Live || rumbleGridLivestreamStatus(gridItem.LivestreamStatus) == "live" {
+		status = "live"
+	} else if dateStatus == "unknown" {
+		status = "unknown"
+	}
+
+	if linkType == model.TypeLivestreams && status == "live" {
+		logger.WithField("guid", guid).Info("skipping live rumble stream")
+		return nil
+	}
+
+	thumbnail := strings.TrimSpace(gridItem.Thumb)
+	if thumbnail != "" {
+		thumbnail = toAbsoluteURL(pageURL, thumbnail)
+	}
+
+	return &rumbleItem{
+		episode: &model.Episode{
+			ID:          guid,
+			Title:       strings.TrimSpace(gridItem.Title),
+			Description: "",
+			Thumbnail:   thumbnail,
+			Duration:    gridItem.Duration,
+			VideoURL:    videoURL,
+			PubDate:     pubDate,
+			Status:      model.EpisodeNew,
+		},
+		status: status,
+	}
+}
+
+func rumbleGridLivestreamStatus(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if strings.Contains(value, "live") {
+			return "live"
+		}
+		return value
+	}
+
+	var number int
+	if err := json.Unmarshal(raw, &number); err == nil && number > 0 {
+		return "live"
+	}
+
+	return ""
 }
 
 func parseRumbleItem(s *goquery.Selection, pageURL string, logger log.FieldLogger) *rumbleItem {
@@ -712,4 +845,13 @@ func toAbsoluteURL(base string, link string) string {
 		return link
 	}
 	return baseURL.ResolveReference(ref).String()
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
