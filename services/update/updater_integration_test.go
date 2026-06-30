@@ -189,6 +189,62 @@ func TestManagerUpdateDownloadFailureIsRetrySafe(t *testing.T) {
 	assert.Equal(t, []string{"ep-1", "ep-1"}, downloader.called)
 }
 
+func TestManagerUpdateSummaryAndReasonCodes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	database := newTestDB(t)
+	storage := newTestLocalStorage(t)
+	downloader := &fakeDownloader{content: map[string]string{"ep-new": "audio-new"}}
+	feedConfig := &feed.Config{
+		ID:       "sample",
+		URL:      "https://youtube.com/channel/sample",
+		Format:   model.FormatAudio,
+		PageSize: 10,
+		Filters:  feed.Filters{MinDuration: 60},
+	}
+
+	manager := &Manager{
+		hostname:   "https://podsync.test",
+		downloader: downloader,
+		db:         database,
+		fs:         storage,
+		feeds:      map[string]*feed.Config{feedConfig.ID: feedConfig},
+		buildFeed: func(_ context.Context, _ *feed.Config) (*model.Feed, error) {
+			return &model.Feed{
+				ID:      feedConfig.ID,
+				Title:   "Sample Feed",
+				ItemURL: "https://example.com/channel",
+				Episodes: []*model.Episode{
+					{ID: "ep-new", Title: "Episode New", Description: "New", VideoURL: "https://example.com/new", Duration: 120, PubDate: time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC), Status: model.EpisodeNew},
+					{ID: "ep-missing", Title: "Missing URL", Description: "Missing", Duration: 120, PubDate: time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC), Status: model.EpisodeNew},
+					{ID: "ep-short", Title: "Short", Description: "Short", VideoURL: "https://example.com/short", Duration: 42, PubDate: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), Status: model.EpisodeNew},
+				},
+			}, nil
+		},
+	}
+
+	summary, err := manager.UpdateWithSummary(ctx, feedConfig)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	assert.Equal(t, 3, summary.SourceItemsFound)
+	assert.Equal(t, 3, summary.NewItemsDiscovered)
+	assert.Equal(t, 1, summary.Downloaded)
+	assert.Equal(t, 1, summary.GeneratedFeedItems)
+
+	missing, err := database.GetEpisode(ctx, feedConfig.ID, "ep-missing")
+	require.NoError(t, err)
+	assert.Equal(t, model.ReasonMissingMediaURL, missing.ReasonCode)
+	assert.Equal(t, model.DecisionSourceAutomatic, missing.DecisionSource)
+	assert.False(t, missing.ProcessedAt.IsZero())
+
+	short, err := database.GetEpisode(ctx, feedConfig.ID, "ep-short")
+	require.NoError(t, err)
+	assert.Equal(t, model.ReasonDurationBelowMinimum, short.ReasonCode)
+	assert.Equal(t, model.DecisionSourceConfiguration, short.DecisionSource)
+	assert.Equal(t, "42", short.Diagnostics["duration_seconds"])
+}
+
 func TestManagerUpdateCleanupRemovesOldFilesAndKeepsDatabaseState(t *testing.T) {
 	t.Parallel()
 

@@ -39,3 +39,4 @@ data
 
 .claude/settings.local.json
 podsync.exe
+tmp/

@@ -167,14 +167,21 @@ func main() {
 
 	// In Headless mode, do one round of feed updates and quit
 	if opts.Headless {
+		started := time.Now()
+		var summaries []*update.FeedSyncSummary
 		for _, _feed := range cfg.Feeds {
-			if err := manager.Update(ctx, _feed); err != nil {
+			summary, err := manager.UpdateWithSummary(ctx, _feed)
+			if summary != nil {
+				summaries = append(summaries, summary)
+			}
+			if err != nil {
 				log.WithError(err).Errorf("failed to update feed: %s", _feed.URL)
 			}
 		}
 		if err := manager.FlushOPML(ctx); err != nil {
 			log.WithError(err).Error("failed to flush opml publisher")
 		}
+		logGlobalSyncSummary(summaries, time.Since(started))
 		return
 	}
 
@@ -299,6 +306,30 @@ func main() {
 	if scheduler != nil {
 		scheduler.Stop()
 	}
+}
+
+func logGlobalSyncSummary(summaries []*update.FeedSyncSummary, duration time.Duration) {
+	fields := log.Fields{"feeds_processed": len(summaries), "duration": duration}
+	for _, summary := range summaries {
+		if summary == nil {
+			continue
+		}
+		fields["source_items_found"] = fieldsInt(fields, "source_items_found") + summary.SourceItemsFound
+		fields["new_items_discovered"] = fieldsInt(fields, "new_items_discovered") + summary.NewItemsDiscovered
+		fields["downloaded"] = fieldsInt(fields, "downloaded") + summary.Downloaded
+		fields["reused_existing_media"] = fieldsInt(fields, "reused_existing_media") + summary.ReusedExistingMedia
+		fields["skipped"] = fieldsInt(fields, "skipped") + summary.Skipped
+		fields["excluded"] = fieldsInt(fields, "excluded") + summary.Excluded
+		fields["failed"] = fieldsInt(fields, "failed") + summary.Failed
+	}
+	log.WithFields(fields).Info("Podsync sync completed")
+}
+
+func fieldsInt(fields log.Fields, key string) int {
+	if value, ok := fields[key].(int); ok {
+		return value
+	}
+	return 0
 }
 
 func validateRuntimeDependencies(ctx context.Context, cfg *Config) error {
