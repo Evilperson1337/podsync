@@ -98,18 +98,11 @@ func NewUpdater(
 	db db.Storage,
 	storage fs.Storage,
 ) (*Manager, error) {
-	sigDir := strings.TrimSpace(signaturesRoot)
-	if sigDir == "" {
-		sigDir = strings.TrimSpace(os.Getenv("PODSYNC_SIGNATURES_DIR"))
+	localDataDir := ""
+	if localFS, ok := storage.(*fs.Local); ok {
+		localDataDir = localFS.RootDir()
 	}
-	if sigDir == "" {
-		if localFS, ok := storage.(*fs.Local); ok {
-			sigDir = localFS.RootDir()
-		}
-	}
-	if localFS, ok := storage.(*fs.Local); ok && sigDir == "" {
-		sigDir = localFS.RootDir()
-	}
+	sigDir := ResolveSignaturesRoot(signaturesRoot, localDataDir)
 	if sigDir != "" {
 		log.WithFields(log.Fields{
 			"signatures_root": sigDir,

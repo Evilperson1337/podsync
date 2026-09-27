@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // SignatureRules defines a rules.json payload for signature actions.
@@ -35,6 +37,25 @@ type SignatureRule struct {
 	Action      string  `json:"action"`
 	PreSeconds  float64 `json:"pre"`
 	PostSeconds float64 `json:"post"`
+}
+
+// ResolveSignaturesRoot returns the directory holding per-feed signature folders
+// (<root>/<feed_id>/signatures). Precedence: the configured [signatures] root_dir, then the
+// PODSYNC_SIGNATURES_DIR environment variable, then the local storage data directory.
+// It returns "" when none applies (for example, S3 storage without an explicit root).
+func ResolveSignaturesRoot(configured string, localDataDir string) string {
+	if root := strings.TrimSpace(configured); root != "" {
+		return root
+	}
+	if root := strings.TrimSpace(os.Getenv("PODSYNC_SIGNATURES_DIR")); root != "" {
+		return root
+	}
+	return strings.TrimSpace(localDataDir)
+}
+
+// SignatureRulesPath returns the rules.json path for a feed under a signatures root.
+func SignatureRulesPath(root string, feedID string) string {
+	return filepath.Join(root, feedID, "signatures", "rules.json")
 }
 
 // ReadSignatureRules loads rules.json if it exists.

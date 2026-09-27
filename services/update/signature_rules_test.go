@@ -33,3 +33,21 @@ func TestReadSignatureRules(t *testing.T) {
 		t.Fatalf("expected 1 rule, got %d", len(rules.Rules))
 	}
 }
+
+func TestResolveSignaturesRoot(t *testing.T) {
+	t.Setenv("PODSYNC_SIGNATURES_DIR", "")
+	if got := ResolveSignaturesRoot("", "/data"); got != "/data" {
+		t.Fatalf("expected local data dir fallback, got %q", got)
+	}
+	if got := ResolveSignaturesRoot("", ""); got != "" {
+		t.Fatalf("expected empty root without local storage, got %q", got)
+	}
+
+	t.Setenv("PODSYNC_SIGNATURES_DIR", "/env")
+	if got := ResolveSignaturesRoot("", "/data"); got != "/env" {
+		t.Fatalf("expected env override, got %q", got)
+	}
+	if got := ResolveSignaturesRoot(" /configured ", "/data"); got != "/configured" {
+		t.Fatalf("expected configured root to win, got %q", got)
+	}
+}

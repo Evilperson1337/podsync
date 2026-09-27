@@ -7,19 +7,35 @@ It uses a two-pass pipeline with a coarse envelope scan and a refined PCM match 
 
 ## Podsync Integration (Automatic Trimming)
 
-Podsync checks for signature files in `/app/data/<feed_id>/signatures/` by default when using local storage.
-If a signature file is found, the downloaded episode is scanned and trimmed so the final output starts at the signature end.
-
-Example directory:
+Signature trimming is built into the standard `podsync` binary and Docker image. No special build is needed. It runs for a feed only when that feed has a `rules.json` file:
 
 ```
-/app/data/crowder/signatures/<signature>.wav
-/app/data/ai_news/signatures/<signature>.mp3
+<signatures_root>/<feed_id>/signatures/rules.json
 ```
+
+Signature audio files placed there without a `rules.json` are ignored.
+
+`<signatures_root>` is resolved in this order:
+
+1. `[signatures] root_dir` in the config file.
+2. The `PODSYNC_SIGNATURES_DIR` environment variable.
+3. The local storage `data_dir` (for example `/app/data` in Docker).
+
+With S3 storage there is no default, so set `root_dir` or `PODSYNC_SIGNATURES_DIR` explicitly.
+
+Example layout using the default location:
+
+```
+/app/data/crowder/signatures/rules.json
+/app/data/crowder/signatures/intro.wav
+/app/data/crowder/signatures/outro.mp3
+```
+
+When a downloaded episode is processed, each rule's signature is searched for, and all matched rules are applied in a single trim before the episode is published. Episodes with no match are published unchanged.
 
 ## Multiple Signatures + Rules (rules.json)
 
-Place `rules.json` in `/app/data/<feed_id>/signatures/`:
+Place `rules.json` in `<signatures_root>/<feed_id>/signatures/`:
 
 ```json
 {
@@ -31,18 +47,29 @@ Place `rules.json` in `/app/data/<feed_id>/signatures/`:
 }
 ```
 
-Template file is available at [`signatures_rules_template.json`](signatures_rules_template.json).
+A template is available at [`signatures_rules_template.json`](signatures_rules_template.json).
+
+Fields:
+- `file`: signature audio file name, relative to the same `signatures` directory.
+- `action`: one of the actions below.
+- `pre` / `post`: padding in seconds, applied as described per action.
 
 Actions:
-- `cut_before`: remove everything before `signature_start - pre`.
+- `cut_before`: remove everything before `signature_end + post`.
 - `cut_after`: remove everything after `signature_start - pre`.
 - `remove_segment`: remove `signature_start - pre` through `signature_end + post`.
 
-Rules are applied sequentially in the listed order.
+All matched rules are combined into one trim plan, and overlapping removals are merged.
+
+Current limits of the Podsync integration:
+- Each rule matches at most once per episode: the strongest occurrence. A signature that repeats (for example, before every ad break) is only removed once.
+- Match thresholds are fixed (`min-score` 0.6, `min-peak-ratio` 1.2) and cannot be set per rule. Use the CLI below to check how a signature scores.
+- Trimmed output is re-encoded as MP3 audio. Use signature trimming only on `format = "audio"` feeds.
 
 ## Requirements
 
-- `ffmpeg` and `ffprobe` available in `PATH`.
+- `ffmpeg` and `ffprobe` available in `PATH`. The Docker image includes both.
+- Podsync checks for them at startup when any feed has a `rules.json`, when `root_dir` or `PODSYNC_SIGNATURES_DIR` is set, or when SponsorBlock is enabled.
 
 ## CLI Usage
 
@@ -77,7 +104,7 @@ go run ./cmd/audiosplitdetect -in input.mp3 -sig-audio signature.mp3 -trim -out 
 
 ## Examples (Windows)
 
-See detailed Windows examples in [`docs/audio_signature_examples.md`](docs/audio_signature_examples.md).
+See detailed Windows examples in [`docs/audio_signature_examples.md`](audio_signature_examples.md).
 
 ## Output Fields
 
