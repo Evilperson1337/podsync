@@ -17,9 +17,18 @@ Episodes now move through explicit persisted states in [`pkg/model/feed.go`](../
 
 The update pipeline in [`services/update/updater.go`](../services/update/updater.go) persists these transitions around expensive work so interrupted runs are easier to diagnose and repair.
 
+For each selected episode the media path is:
+
+```text
+provider download → temp file → processing (SponsorBlock / signature trim) → publish into storage
+→ optional Audiobookshelf hardlink export → post_episode_download hooks → stored
+```
+
 ## Reconciliation
 
 At the start of an update run, [`(*Manager).reconcileFeedState()`](../services/update/updater.go) repairs interrupted transient states such as `planned`, `downloading`, `processing`, and `stored` into retryable `error` state with persisted failure metadata.
+
+When [Audiobookshelf export](./audiobookshelf.md) is enabled for a feed, [`(*Manager).reconcileAudiobookshelf()`](../services/update/updater.go) runs after cleanup and ensures every retained (`stored` / `published`) episode is hardlinked into the configured Audiobookshelf directory. This backfills episodes downloaded before export was enabled and retries earlier export failures. Export failures are logged and counted but never change episode state. Podsync records each link's device and inode on the episode (`audiobookshelf_link`). With that record, the same pass mirrors deletions in both directions: an episode deleted in Audiobookshelf (its Podsync file's link count has dropped to 1) has its Podsync file removed and is marked `cleaned`, and an episode whose Podsync file was deleted has its recorded Audiobookshelf link removed. Cleanup removes the Audiobookshelf hardlink (after verifying it is the same inode) before deleting the Podsync file.
 
 ## Scheduling and execution
 

@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/builder"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
@@ -30,6 +31,10 @@ var (
 	metricReconciledEpisodes    = expvar.NewInt("reconciled_episodes_total")
 	metricFeedRunSuccesses      = expvar.NewInt("feed_run_successes_total")
 	metricFeedRunFailures       = expvar.NewInt("feed_run_failures_total")
+	metricABSLinksCreated       = expvar.NewInt("audiobookshelf_links_created_total")
+	metricABSExportFailures     = expvar.NewInt("audiobookshelf_export_failures_total")
+	metricABSLinksRemoved       = expvar.NewInt("audiobookshelf_links_removed_total")
+	metricABSMirroredDeletions  = expvar.NewInt("audiobookshelf_mirrored_deletions_total")
 )
 
 type Downloader interface {
@@ -51,6 +56,7 @@ type Manager struct {
 	buildFeed   func(ctx context.Context, cfg *feed.Config) (*model.Feed, error)
 	opml        *OPMLPublisher
 	publication *PublicationService
+	abs         *audiobookshelf.Exporter
 }
 
 type FeedSyncSummary struct {
@@ -149,6 +155,11 @@ func (u *Manager) SetOPMLPublisher(publisher *OPMLPublisher) {
 	u.opml = publisher
 }
 
+// SetAudiobookshelfExporter enables hardlink export for feeds that opt in via [feeds.ID.audiobookshelf].
+func (u *Manager) SetAudiobookshelfExporter(exporter *audiobookshelf.Exporter) {
+	u.abs = exporter
+}
+
 func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	_, err := u.UpdateWithSummary(ctx, feedConfig)
 	return err
@@ -199,6 +210,8 @@ func (u *Manager) UpdateWithSummary(ctx context.Context, feedConfig *feed.Config
 	if err := u.cleanup(ctx, feedConfig); err != nil {
 		log.WithError(err).Error("cleanup failed")
 	}
+
+	u.reconcileAudiobookshelf(ctx, feedConfig)
 
 	if err := u.buildXML(ctx, feedConfig); err != nil {
 		_ = u.recordFeedRunFailure(ctx, feedConfig.ID, err)
@@ -633,6 +646,9 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			trimmedCleanup()
 		}
 
+		// Media is final at this point; export failures are logged but never fail the episode.
+		u.exportToAudiobookshelf(ctx, feedConfig, episode, episodeName)
+
 		// Execute post episode download hooks
 		if len(feedConfig.PostEpisodeDownload) > 0 {
 			env := []string{
@@ -750,6 +766,12 @@ func (u *Manager) cleanup(ctx context.Context, feedConfig *feed.Config) error {
 			path        = fmt.Sprintf("%s/%s", feedConfig.ID, episodeName)
 		)
 
+		// Remove the Audiobookshelf hardlink first: it can only be verified while the source still exists.
+		if err := u.removeFromAudiobookshelf(ctx, feedConfig, episode, episodeName); err != nil {
+			result = multierror.Append(result, errors.Wrapf(err, "failed to remove audiobookshelf copy of episode: %s", episode.ID))
+			continue
+		}
+
 		err := u.fs.Delete(ctx, path)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -761,18 +783,211 @@ func (u *Manager) cleanup(ctx context.Context, feedConfig *feed.Config) error {
 			logger.WithField("episode_id", episode.ID).Info("episode was not found - file does not exist")
 		}
 
-		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
-			episode.Status = model.EpisodeCleaned
-			episode.Title = ""
-			episode.Description = ""
-			return nil
-		}); err != nil {
+		if err := u.markEpisodeCleaned(feedID, episode.ID); err != nil {
 			result = multierror.Append(result, errors.Wrapf(err, "failed to set state for cleaned episode: %s", episode.ID))
 			continue
 		}
 	}
 
 	return result.ErrorOrNil()
+}
+
+func (u *Manager) audiobookshelfEnabled(feedConfig *feed.Config) bool {
+	return u.abs != nil && feedConfig != nil && feedConfig.Audiobookshelf.Enabled
+}
+
+// audiobookshelfSource returns the local path of an episode's Podsync media file.
+func (u *Manager) audiobookshelfSource(feedConfig *feed.Config, episodeName string) (string, bool) {
+	localFS, ok := u.fs.(*fs.Local)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(localFS.RootDir(), feedConfig.ID, episodeName), true
+}
+
+func audiobookshelfLogger(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, result audiobookshelf.Result) log.FieldLogger {
+	fields := log.Fields{
+		"feed_id":          feedConfig.ID,
+		"episode_id":       episode.ID,
+		"title":            episode.Title,
+		"source_path":      result.Source,
+		"destination_path": result.Destination,
+		"status":           result.Status,
+	}
+	if result.Inode != 0 {
+		fields["inode"] = result.Inode
+		fields["links"] = result.Links
+	}
+	if result.Status == audiobookshelf.StatusCrossDevice {
+		fields["source_device"] = result.SourceDevice
+		fields["destination_device"] = result.DestinationDevice
+	}
+	return loggerWithExecution(ctx, fields)
+}
+
+// saveAudiobookshelfLink persists the verified hardlink so it can later be recognized as Podsync's own.
+func (u *Manager) saveAudiobookshelfLink(feedID string, episode *model.Episode, record *model.HardlinkRecord) error {
+	if record == nil || (episode.AudiobookshelfLink != nil && *episode.AudiobookshelfLink == *record) {
+		return nil
+	}
+	return u.db.UpdateEpisode(feedID, episode.ID, func(existing *model.Episode) error {
+		existing.AudiobookshelfLink = record
+		return nil
+	})
+}
+
+// markEpisodeCleaned records that an episode's media is gone, matching what cleanup does.
+func (u *Manager) markEpisodeCleaned(feedID, episodeID string) error {
+	return u.db.UpdateEpisode(feedID, episodeID, func(episode *model.Episode) error {
+		episode.Status = model.EpisodeCleaned
+		episode.Title = ""
+		episode.Description = ""
+		episode.AudiobookshelfLink = nil
+		return nil
+	})
+}
+
+// reconcileAudiobookshelf keeps Audiobookshelf and Podsync mirrored for every retained episode:
+// it backfills and repairs missing links, and propagates deletions made on either side.
+// Published episodes never re-enter the download path, so this pass is also what retries
+// earlier export failures.
+func (u *Manager) reconcileAudiobookshelf(ctx context.Context, feedConfig *feed.Config) {
+	if !u.audiobookshelfEnabled(feedConfig) {
+		return
+	}
+	var episodes []*model.Episode
+	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
+		if model.IsEpisodePublishable(episode.Status) {
+			episodes = append(episodes, episode)
+		}
+		return nil
+	}); err != nil {
+		loggerWithExecution(ctx, log.Fields{"feed_id": feedConfig.ID}).WithError(err).Warn("failed to list episodes for audiobookshelf reconciliation")
+		return
+	}
+	for _, episode := range episodes {
+		u.reconcileAudiobookshelfEpisode(ctx, feedConfig, episode)
+	}
+}
+
+func (u *Manager) reconcileAudiobookshelfEpisode(ctx context.Context, feedConfig *feed.Config, episode *model.Episode) {
+	episodeName := feed.EpisodeName(feedConfig, episode)
+	source, ok := u.audiobookshelfSource(feedConfig, episodeName)
+	if !ok {
+		return
+	}
+	result, err := u.abs.Reconcile(source, feedConfig.Audiobookshelf.Directory, episode.AudiobookshelfLink)
+	logger := audiobookshelfLogger(ctx, feedConfig, episode, result)
+
+	// An unverifiable library file after the Podsync file is gone is expected; the episode is still cleaned below.
+	unverifiedOrphan := result.SourceMissing && errors.Is(err, audiobookshelf.ErrUnverified)
+	if err != nil && !unverifiedOrphan {
+		metricABSExportFailures.Add(1)
+		logger.WithError(err).Warn("audiobookshelf reconciliation failed; Podsync episode is unaffected and it will be retried next run")
+		return
+	}
+
+	switch {
+	case result.Status == audiobookshelf.StatusLinked || result.Status == audiobookshelf.StatusAlreadyLinked:
+		if result.Status == audiobookshelf.StatusLinked {
+			metricABSLinksCreated.Add(1)
+			logger.Infof("Linked Video Name: %q into Audiobookshelf", episode.Title)
+		} else {
+			logger.Debug("audiobookshelf hardlink already present")
+		}
+		if err := u.saveAudiobookshelfLink(feedConfig.ID, episode, result.Record); err != nil {
+			logger.WithError(err).Warn("failed to record audiobookshelf hardlink")
+		}
+
+	case result.Status == audiobookshelf.StatusDeletedInLibrary:
+		// Deleted in Audiobookshelf: remove the Podsync copy too.
+		if err := u.fs.Delete(ctx, fmt.Sprintf("%s/%s", feedConfig.ID, episodeName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			logger.WithError(err).Error("failed to remove Podsync copy of episode deleted in Audiobookshelf")
+			return
+		}
+		if err := u.markEpisodeCleaned(feedConfig.ID, episode.ID); err != nil {
+			logger.WithError(err).Error("failed to mark episode deleted in Audiobookshelf as cleaned")
+			return
+		}
+		metricABSMirroredDeletions.Add(1)
+		logger.Infof("Video Name: %q was deleted in Audiobookshelf; removed it from Podsync", episode.Title)
+
+	case result.SourceMissing:
+		// Deleted from Podsync storage outside cleanup: the Audiobookshelf link was removed if it was verifiably ours.
+		if result.Status == audiobookshelf.StatusRemoved {
+			metricABSLinksRemoved.Add(1)
+		}
+		if err != nil {
+			logger.WithError(err).Warn("Podsync media is gone; audiobookshelf file could not be verified as Podsync's hardlink and was left in place")
+		}
+		if err := u.markEpisodeCleaned(feedConfig.ID, episode.ID); err != nil {
+			logger.WithError(err).Error("failed to mark episode with missing media as cleaned")
+			return
+		}
+		metricABSMirroredDeletions.Add(1)
+		logger.Infof("Video Name: %q was deleted from Podsync storage; mirrored the deletion to Audiobookshelf", episode.Title)
+	}
+}
+
+// exportToAudiobookshelf hardlinks a newly published episode into the feed's Audiobookshelf directory.
+// Audiobookshelf is a secondary target: failures are logged and counted, never persisted as episode state.
+func (u *Manager) exportToAudiobookshelf(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, episodeName string) {
+	if !u.audiobookshelfEnabled(feedConfig) {
+		return
+	}
+	source, ok := u.audiobookshelfSource(feedConfig, episodeName)
+	if !ok {
+		metricABSExportFailures.Add(1)
+		loggerWithExecution(ctx, log.Fields{"feed_id": feedConfig.ID, "episode_id": episode.ID}).Warn("audiobookshelf export requires local storage; skipping")
+		return
+	}
+	result, err := u.abs.Export(source, feedConfig.Audiobookshelf.Directory)
+	logger := audiobookshelfLogger(ctx, feedConfig, episode, result)
+	if err != nil {
+		metricABSExportFailures.Add(1)
+		logger.WithError(err).Warn("audiobookshelf hardlink export failed; Podsync episode is unaffected and export will be retried next run")
+		return
+	}
+	if result.Status == audiobookshelf.StatusLinked {
+		metricABSLinksCreated.Add(1)
+		logger.Infof("Linked Video Name: %q into Audiobookshelf", episode.Title)
+	} else {
+		logger.Debug("audiobookshelf hardlink already present")
+	}
+	if err := u.saveAudiobookshelfLink(feedConfig.ID, episode, result.Record); err != nil {
+		logger.WithError(err).Warn("failed to record audiobookshelf hardlink")
+	}
+}
+
+// removeFromAudiobookshelf deletes the episode's Audiobookshelf hardlink so the library mirrors Podsync.
+// It returns an error only when the Podsync copy should be kept so cleanup can retry next run
+// (for example, the library is not mounted or the file cannot be deleted); unrelated files at the
+// destination are logged and left in place.
+func (u *Manager) removeFromAudiobookshelf(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, episodeName string) error {
+	if !u.audiobookshelfEnabled(feedConfig) {
+		return nil
+	}
+	source, ok := u.audiobookshelfSource(feedConfig, episodeName)
+	if !ok {
+		return nil
+	}
+	result, err := u.abs.Remove(source, feedConfig.Audiobookshelf.Directory, episode.AudiobookshelfLink)
+	logger := audiobookshelfLogger(ctx, feedConfig, episode, result)
+	switch {
+	case err == nil && result.Status == audiobookshelf.StatusRemoved:
+		metricABSLinksRemoved.Add(1)
+		logger.Infof("Removed Video Name: %q from Audiobookshelf", episode.Title)
+		return nil
+	case err == nil:
+		logger.Debug("no audiobookshelf copy to remove")
+		return nil
+	case errors.Is(err, audiobookshelf.ErrConflict), errors.Is(err, audiobookshelf.ErrUnverified):
+		logger.WithError(err).Warn("audiobookshelf file is not Podsync's hardlink; left in place during cleanup")
+		return nil
+	default:
+		logger.WithError(err).Error("failed to remove audiobookshelf copy; keeping Podsync copy so cleanup retries next run")
+		return err
+	}
 }
 
 func (u *Manager) reconcileFeedState(ctx context.Context, feedConfig *feed.Config) error {

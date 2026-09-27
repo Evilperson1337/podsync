@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jessevdk/go-flags"
+	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/audiosig"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
@@ -164,6 +165,10 @@ func main() {
 	manager.SetOPMLPublisher(update.NewOPMLPublisher(func(buildCtx context.Context) error {
 		return manager.BuildOPMLNow(buildCtx)
 	}, time.Second))
+	if cfg.Audiobookshelf.Enabled {
+		manager.SetAudiobookshelfExporter(audiobookshelf.NewExporter(cfg.Audiobookshelf.PodcastRoot))
+		log.WithField("podcast_root", cfg.Audiobookshelf.PodcastRoot).Info("audiobookshelf hardlink export enabled")
+	}
 
 	// In Headless mode, do one round of feed updates and quit
 	if opts.Headless {

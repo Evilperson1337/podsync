@@ -61,6 +61,16 @@ type Episode struct {
 	DecisionSource  string            `json:"decision_source,omitempty"`
 	ProcessedAt     time.Time         `json:"processed_at,omitempty"`
 	Diagnostics     map[string]string `json:"diagnostics,omitempty"`
+	// AudiobookshelfLink records the Audiobookshelf hardlink Podsync created for this episode.
+	AudiobookshelfLink *HardlinkRecord `json:"audiobookshelf_link,omitempty"`
+}
+
+// HardlinkRecord identifies a hardlink Podsync created outside its own storage, so it can be
+// verified as Podsync's own even after the Podsync source file is gone.
+type HardlinkRecord struct {
+	Path   string `json:"path"`
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
 }
 
 type Feed struct {

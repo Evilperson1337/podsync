@@ -3,6 +3,7 @@ package feed
 import (
 	"time"
 
+	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/model"
 )
 
@@ -61,6 +62,8 @@ type Config struct {
 	PrivateFeed bool `toml:"private_feed"`
 	// Playlist sort
 	PlaylistSort model.Sorting `toml:"playlist_sort"`
+	// Audiobookshelf hardlink export for this feed (requires the global [audiobookshelf] section)
+	Audiobookshelf audiobookshelf.FeedConfig `toml:"audiobookshelf"`
 }
 
 type CustomFormat struct {

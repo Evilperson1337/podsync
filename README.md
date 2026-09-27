@@ -58,6 +58,7 @@ brew install yt-dlp ffmpeg go
 - [Audio signature examples (Windows)](./docs/audio_signature_examples.md)
 - [Runtime architecture](./docs/runtime_architecture.md)
 - [Observability and operations](./docs/observability.md)
+- [Audiobookshelf hardlink export](./docs/audiobookshelf.md)
 
 ## 🌙 Nightly builds
 
@@ -154,6 +155,22 @@ Local storage writes are now staged into sibling temporary files and atomically 
 Publication activity is also persisted through summary metadata so XML/OPML build counts and last publication timestamps survive restarts.
 
 Podsync now also uses an explicit staged publish helper above [`fs.Storage`](pkg/fs/storage.go) for media and publication artifacts. Content is staged, minimum-size validated where appropriate, and only then committed to the underlying backend.
+
+### Audiobookshelf export
+
+Podsync can hardlink finalized episodes into an existing Audiobookshelf podcast directory, so no extra disk space is used. Export is opt-in, requires local storage, and requires both paths to be on the same filesystem. Podsync never falls back to copying.
+
+```toml
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds.doctrine.audiobookshelf]
+enabled = true
+directory = "Doctrine"
+```
+
+The Audiobookshelf directory mirrors Podsync in both directions: episodes removed by Podsync cleanup (or deleted from Podsync storage) are removed from Audiobookshelf, and episodes deleted in Audiobookshelf are removed from Podsync. Podsync only deletes files it can verify are its own hardlinks. See [Audiobookshelf hardlink export](./docs/audiobookshelf.md) for Docker/Unraid mappings and validation steps.
 
 ### 🌍 Environment Variables
 

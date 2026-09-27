@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/fs"
@@ -43,6 +44,8 @@ type Config struct {
 	Signatures SignatureConfig `toml:"signatures"`
 	// Global cleanup policy applied to feeds that don't specify their own cleanup policy
 	Cleanup *feed.Cleanup `toml:"cleanup"`
+	// Audiobookshelf is the optional hardlink export into an Audiobookshelf podcast library
+	Audiobookshelf audiobookshelf.Config `toml:"audiobookshelf"`
 }
 
 type SignatureConfig struct {
@@ -165,9 +168,44 @@ func (c *Config) validate() error {
 		if err := validateSponsorBlockConfig(id, f.Custom.SponsorBlockConfig()); err != nil {
 			result = multierror.Append(result, err)
 		}
+
+		if err := validateFeedAudiobookshelf(id, f.Audiobookshelf, c.Audiobookshelf.Enabled); err != nil {
+			result = multierror.Append(result, err)
+		}
+	}
+
+	if err := c.validateAudiobookshelf(); err != nil {
+		result = multierror.Append(result, err)
 	}
 
 	return result.ErrorOrNil()
+}
+
+func (c *Config) validateAudiobookshelf() error {
+	if !c.Audiobookshelf.Enabled {
+		return nil
+	}
+	var result *multierror.Error
+	if strings.TrimSpace(c.Audiobookshelf.PodcastRoot) == "" {
+		result = multierror.Append(result, errors.New("audiobookshelf.podcast_root is required when audiobookshelf export is enabled"))
+	}
+	if c.Storage.Type != "local" {
+		result = multierror.Append(result, errors.Errorf("audiobookshelf export requires local storage (hardlinks cannot be created from %q storage)", c.Storage.Type))
+	}
+	return result.ErrorOrNil()
+}
+
+func validateFeedAudiobookshelf(feedID string, cfg audiobookshelf.FeedConfig, globalEnabled bool) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if err := audiobookshelf.ValidateDirectory(cfg.Directory); err != nil {
+		return errors.Wrapf(err, "invalid audiobookshelf.directory for %q", feedID)
+	}
+	if !globalEnabled {
+		log.Warnf("audiobookshelf export is enabled for feed %q but disabled globally; set [audiobookshelf] enabled = true to export", feedID)
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults(configPath string) {

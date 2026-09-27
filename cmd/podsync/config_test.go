@@ -526,6 +526,138 @@ type = "s3"
 	})
 }
 
+func TestLoadConfig_Audiobookshelf(t *testing.T) {
+	const localStorage = `
+[storage]
+type = "local"
+  [storage.local]
+  data_dir = "/data/podsync"
+`
+
+	t.Run("disabled by default", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`)
+		defer os.Remove(path)
+
+		config, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.False(t, config.Audiobookshelf.Enabled)
+		assert.Empty(t, config.Audiobookshelf.PodcastRoot)
+		assert.False(t, config.Feeds["doctrine"].Audiobookshelf.Enabled)
+		assert.Empty(t, config.Feeds["doctrine"].Audiobookshelf.Directory)
+	})
+
+	t.Run("valid global and feed config parses", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [feeds.doctrine.audiobookshelf]
+  enabled = true
+  directory = "Doctrine"
+`)
+		defer os.Remove(path)
+
+		config, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.True(t, config.Audiobookshelf.Enabled)
+		assert.Equal(t, "/data/media/podcasts", config.Audiobookshelf.PodcastRoot)
+		assert.True(t, config.Feeds["doctrine"].Audiobookshelf.Enabled)
+		assert.Equal(t, "Doctrine", config.Feeds["doctrine"].Audiobookshelf.Directory)
+	})
+
+	t.Run("missing podcast_root fails", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "audiobookshelf.podcast_root is required")
+	})
+
+	t.Run("missing feed directory fails", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [feeds.doctrine.audiobookshelf]
+  enabled = true
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `invalid audiobookshelf.directory for "doctrine"`)
+	})
+
+	for name, dir := range map[string]string{"traversal": "../escape", "absolute": "/data/media/podcasts/Doctrine"} {
+		t.Run(name+" feed directory fails", func(t *testing.T) {
+			path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [feeds.doctrine.audiobookshelf]
+  enabled = true
+  directory = "`+dir+`"
+`)
+			defer os.Remove(path)
+
+			_, err := LoadConfig(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "audiobookshelf.directory")
+		})
+	}
+
+	t.Run("s3 storage is rejected", func(t *testing.T) {
+		path := setup(t, `
+[server]
+hostname = "https://podsync.example.com"
+
+[storage]
+type = "s3"
+  [storage.s3]
+  endpoint_url = "https://s3.example.com"
+  region = "us-east-1"
+  bucket = "podsync"
+
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "audiobookshelf export requires local storage")
+	})
+}
+
 func setup(t *testing.T, file string) string {
 	t.Helper()
 
