@@ -15,7 +15,14 @@ import (
 
 type Server struct {
 	http.Server
-	db db.Storage
+	db        db.Storage
+	feedCount func() int
+}
+
+// SetFeedCount reports the number of configured feeds in /health. The function is called on
+// every request, so it reflects configuration reloads.
+func (s *Server) SetFeedCount(count func() int) {
+	s.feedCount = count
 }
 
 type Config struct {
@@ -91,11 +98,21 @@ type HealthStatus struct {
 	FailedEpisodes    int            `json:"failed_episodes,omitempty"`
 	FailureCategories map[string]int `json:"failure_categories,omitempty"`
 	Message           string         `json:"message,omitempty"`
+	ConfiguredFeeds   *int           `json:"configured_feeds,omitempty"`
 }
 
 func (s *Server) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	status, err := s.healthStatus(r)
+	if s.feedCount != nil {
+		count := s.feedCount()
+		status.ConfiguredFeeds = &count
+		// Having no feeds is a setup state, not a failure: keep the status healthy so container
+		// health checks pass while the user edits the configuration.
+		if count == 0 && err == nil && status.Status == "healthy" {
+			status.Message = "no feeds configured; add [feeds.<id>] sections to the configuration file"
+		}
+	}
 
 	if err != nil {
 		log.WithError(err).Error("health check database error")

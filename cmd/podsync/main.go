@@ -297,6 +297,7 @@ func main() {
 
 	// Run web server
 	srv := web.New(cfg.Server, storage, database)
+	srv.SetFeedCount(func() int { return len(cfg.Feeds) })
 
 	group.Go(func() error {
 		log.Infof("running listener at %s", srv.Addr)

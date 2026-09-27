@@ -47,3 +47,34 @@ func TestHealthCheckReportsFailureCategories(t *testing.T) {
 	assert.Equal(t, "unhealthy", summary.Status)
 	assert.Equal(t, 1, summary.FailedEpisodes)
 }
+
+func TestHealthCheckReportsConfiguredFeeds(t *testing.T) {
+	database, err := db.NewBadger(&db.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	defer database.Close()
+
+	feeds := 0
+	srv := New(Config{}, &mockFileSystem{}, database)
+	srv.SetFeedCount(func() int { return feeds })
+
+	get := func() (int, HealthStatus) {
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		var health HealthStatus
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &health))
+		return rec.Code, health
+	}
+
+	code, health := get()
+	assert.Equal(t, http.StatusOK, code, "no feeds is a setup state, not a failure")
+	assert.Equal(t, "healthy", health.Status)
+	require.NotNil(t, health.ConfiguredFeeds)
+	assert.Equal(t, 0, *health.ConfiguredFeeds)
+	assert.Contains(t, health.Message, "no feeds configured")
+
+	feeds = 3
+	code, health = get()
+	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, 3, *health.ConfiguredFeeds)
+	assert.NotContains(t, health.Message, "no feeds configured")
+}
