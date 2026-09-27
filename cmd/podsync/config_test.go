@@ -803,3 +803,17 @@ type = "s3"
 		require.NoError(t, err)
 	})
 }
+
+func TestLoadConfig_InvalidCronSchedule(t *testing.T) {
+	path := setup(t, `
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  cron_schedule = "every day at 3"
+`)
+	defer os.Remove(path)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid cron_schedule "every day at 3" for "A"`)
+}

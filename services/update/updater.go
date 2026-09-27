@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -49,6 +50,7 @@ type Manager struct {
 	downloader  Downloader
 	db          db.Storage
 	fs          fs.Storage
+	configMu    sync.RWMutex // guards feeds and keys, which change on configuration reload
 	feeds       map[string]*feed.Config
 	keys        map[model.Provider]feed.KeyProvider
 	sigDir      string
@@ -109,7 +111,7 @@ func NewUpdater(
 			"signatures_dir":  filepath.Join(sigDir, "<feed_id>", "signatures"),
 		}).Info("signature trim enabled")
 	}
-	return &Manager{
+	manager := &Manager{
 		hostname:    hostname,
 		downloader:  downloader,
 		db:          db,
@@ -119,10 +121,40 @@ func NewUpdater(
 		sigDir:      sigDir,
 		overlay:     overlay.NewDefaultManager(nil),
 		publication: NewPublicationService(db, storage, feeds, hostname),
-		buildFeed: func(ctx context.Context, cfg *feed.Config) (*model.Feed, error) {
-			return defaultBuildFeed(ctx, cfg, keys, downloader)
-		},
-	}, nil
+	}
+	// Keys are read on every build so that reloaded API tokens take effect.
+	manager.buildFeed = func(ctx context.Context, cfg *feed.Config) (*model.Feed, error) {
+		return defaultBuildFeed(ctx, cfg, manager.currentKeys(), downloader)
+	}
+	return manager, nil
+}
+
+// SetFeeds replaces the configured feeds, e.g. after a configuration reload. Updates already
+// running keep the feed configuration they started with.
+func (u *Manager) SetFeeds(feeds map[string]*feed.Config) {
+	u.configMu.Lock()
+	u.feeds = feeds
+	u.configMu.Unlock()
+	u.publicationService().SetFeeds(feeds)
+}
+
+// SetKeys replaces the API key providers, e.g. after a configuration reload.
+func (u *Manager) SetKeys(keys map[model.Provider]feed.KeyProvider) {
+	u.configMu.Lock()
+	defer u.configMu.Unlock()
+	u.keys = keys
+}
+
+func (u *Manager) currentFeeds() map[string]*feed.Config {
+	u.configMu.RLock()
+	defer u.configMu.RUnlock()
+	return u.feeds
+}
+
+func (u *Manager) currentKeys() map[model.Provider]feed.KeyProvider {
+	u.configMu.RLock()
+	defer u.configMu.RUnlock()
+	return u.keys
 }
 
 func defaultBuildFeed(ctx context.Context, feedConfig *feed.Config, keys map[model.Provider]feed.KeyProvider, downloader Downloader) (*model.Feed, error) {
@@ -276,7 +308,7 @@ func (u *Manager) shouldBuildOPML(feedConfig *feed.Config) bool {
 	if feedConfig != nil && feedConfig.OPML {
 		return true
 	}
-	for _, cfg := range u.feeds {
+	for _, cfg := range u.currentFeeds() {
 		if cfg != nil && cfg.OPML {
 			return false
 		}
@@ -698,7 +730,7 @@ func (u *Manager) buildOPML(ctx context.Context) error {
 
 func (u *Manager) publicationService() *PublicationService {
 	if u.publication == nil {
-		u.publication = NewPublicationService(u.db, u.fs, u.feeds, u.hostname)
+		u.publication = NewPublicationService(u.db, u.fs, u.currentFeeds(), u.hostname)
 	}
 	return u.publication
 }

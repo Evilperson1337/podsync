@@ -15,8 +15,6 @@ import (
 	"github.com/jessevdk/go-flags"
 	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/audiosig"
-	"github.com/mxpv/podsync/pkg/feed"
-	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
 	"github.com/robfig/cron/v3"
@@ -36,6 +34,8 @@ type Opts struct {
 	NoBanner    bool   `long:"no-banner" description:"Do not print the startup banner"`
 	CheckConfig bool   `long:"check-config" description:"Validate the configuration file and exit"`
 	Init        bool   `long:"init" description:"Write a starter configuration file to the --config path and exit"`
+	// NoConfigWatch disables reloading when the configuration file changes (SIGHUP still reloads).
+	NoConfigWatch bool `long:"no-config-watch" env:"PODSYNC_NO_CONFIG_WATCH" description:"Do not reload the configuration when the file changes (SIGHUP still reloads)"`
 }
 
 const banner = `
@@ -175,16 +175,9 @@ func main() {
 
 	// Run updater thread
 	log.Debug("creating key providers")
-	keys := map[model.Provider]feed.KeyProvider{}
-	for name, list := range cfg.Tokens {
-		provider, err := feed.NewKeyProvider(list)
-		if err != nil {
-			log.WithError(err).Fatalf("failed to create key provider for %q", name)
-		}
-		keys[name] = provider
-	}
-	if _, ok := keys[model.ProviderRumble]; !ok {
-		keys[model.ProviderRumble] = feed.NewStaticKeyProvider("")
+	keys, err := newKeyProviders(cfg.Tokens)
+	if err != nil {
+		log.WithError(err).Fatal("failed to create key providers")
 	}
 
 	log.Debug("creating update manager")
@@ -192,9 +185,10 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatal("failed to create updater")
 	}
-	manager.SetOPMLPublisher(update.NewOPMLPublisher(func(buildCtx context.Context) error {
+	opmlPublisher := update.NewOPMLPublisher(func(buildCtx context.Context) error {
 		return manager.BuildOPMLNow(buildCtx)
-	}, time.Second))
+	}, time.Second)
+	manager.SetOPMLPublisher(opmlPublisher)
 	if cfg.Audiobookshelf.Enabled {
 		manager.SetAudiobookshelfExporter(audiobookshelf.NewExporter(cfg.Audiobookshelf.PodcastRoot))
 		log.WithField("podcast_root", cfg.Audiobookshelf.PodcastRoot).Info("audiobookshelf hardlink export enabled")
@@ -220,7 +214,6 @@ func main() {
 		return
 	}
 
-	var scheduler *update.Scheduler
 	group, ctx := errgroup.WithContext(ctx)
 	defer func() {
 		if err := manager.FlushOPML(context.Background()); err != nil {
@@ -229,120 +222,102 @@ func main() {
 		log.Info("gracefully stopped")
 	}()
 
-	// Create Cron
-	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
-	m := make(map[string]cron.EntryID)
-	scheduler = update.NewScheduler(manager, 4, 64)
+	scheduler := update.NewScheduler(manager, 4, 64)
 	scheduler.Start(ctx)
+	defer scheduler.Stop()
 
-	// Run cron scheduler
+	// Schedule feeds with cron. The same schedule is updated when the configuration is reloaded.
+	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
+	schedule := newFeedSchedule(c, scheduler, opts.NoBanner)
+	if _, err := schedule.Apply(cfg.Feeds); err != nil {
+		log.WithError(err).Fatal("can't schedule feeds")
+	}
+	c.Start()
 	group.Go(func() error {
-		var cronID cron.EntryID
-
-		for _, _feed := range cfg.Feeds {
-			// Track if this feed has an explicit cron schedule
-			hasExplicitCronSchedule := _feed.CronSchedule != ""
-
-			if _feed.CronSchedule == "" {
-				_feed.CronSchedule = fmt.Sprintf("@every %s", _feed.UpdatePeriod.String())
-			}
-			cronFeed := _feed
-			if cronID, err = c.AddFunc(cronFeed.CronSchedule, func() {
-				if !scheduler.Enqueue(cronFeed) {
-					log.WithFields(log.Fields{
-						"feed_id":     cronFeed.ID,
-						"queue_stats": scheduler.Stats(),
-					}).Debug("feed update request deduplicated")
-					return
-				}
-				log.WithFields(log.Fields{
-					"feed_id":     cronFeed.ID,
-					"queue_stats": scheduler.Stats(),
-				}).Debug("feed update requested")
-			}); err != nil {
-				log.WithError(err).Fatalf("can't create cron task for feed: %s", cronFeed.ID)
-			}
-
-			m[cronFeed.ID] = cronID
-			log.Debugf("-> %s (update '%s')", cronFeed.ID, cronFeed.CronSchedule)
-
-			// Only perform initial update if no explicit cron schedule is configured
-			// This prevents unwanted updates when using fixed schedules in Docker deployments
-			// If --no-banner is used (Docker default), still perform an initial update
-			if !hasExplicitCronSchedule || opts.NoBanner {
-				log.WithFields(log.Fields{
-					"feed_id":               cronFeed.ID,
-					"has_explicit_schedule": hasExplicitCronSchedule,
-					"no_banner":             opts.NoBanner,
-				}).Info("attempting startup enqueue")
-				enqueued := scheduler.Enqueue(cronFeed)
-				log.WithFields(log.Fields{
-					"feed_id":  cronFeed.ID,
-					"enqueued": enqueued,
-				}).Info("startup enqueue result")
-			}
-		}
-
-		c.Start()
-
-		for {
-			<-ctx.Done()
-
-			log.Info("shutting down cron")
-			c.Stop()
-
-			return ctx.Err()
-		}
+		<-ctx.Done()
+		log.Info("shutting down cron")
+		c.Stop()
+		return ctx.Err()
 	})
 
-	if cfg.Storage.Type == "s3" {
-		return // S3 content is hosted externally
+	reloader := &configReloader{
+		path:     opts.ConfigPath,
+		updater:  manager,
+		schedule: schedule,
+		current:  cfg,
+		validate: func(next *Config) error { return validateRuntimeDependencies(ctx, next) },
+		afterReload: func(feedChanges) {
+			opmlPublisher.Request(ctx)
+		},
 	}
 
-	// Run web server
-	srv := web.New(cfg.Server, storage, database)
-	srv.SetFeedCount(func() int { return len(cfg.Feeds) })
-
+	// Reload the configuration on SIGHUP, and when the file changes unless disabled.
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGHUP)
 	group.Go(func() error {
-		log.Infof("running listener at %s", srv.Addr)
-		if cfg.Server.TLS {
-			return srv.ListenAndServeTLS(cfg.Server.CertificatePath, cfg.Server.KeyFilePath)
-		} else {
-			return srv.ListenAndServe()
-		}
-	})
-
-	group.Go(func() error {
-		// Shutdown web server
-		defer func() {
-			ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer func() {
-				cancel()
-			}()
-			log.Info("shutting down web server")
-			if err := srv.Shutdown(ctxShutDown); err != nil {
-				log.WithError(err).Error("server shutdown failed")
-			}
-		}()
-
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-stop:
-				cancel()
-				return nil
+			case <-hangup:
+				_ = reloader.Reload("SIGHUP")
 			}
 		}
 	})
+	if !opts.NoConfigWatch {
+		log.WithField("config", absPath(opts.ConfigPath)).Info("watching configuration file for changes; feeds and tokens reload automatically")
+		group.Go(func() error {
+			watchConfigFile(ctx, opts.ConfigPath, configWatchInterval, func() {
+				_ = reloader.Reload("file changed")
+			})
+			return ctx.Err()
+		})
+	}
 
-	if err := group.Wait(); err != nil && (err != context.Canceled && err != http.ErrServerClosed) {
+	// Stop on SIGINT/SIGTERM.
+	group.Go(func() error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-stop:
+			cancel()
+			return nil
+		}
+	})
+
+	if cfg.Storage.Type == "s3" {
+		// S3 content is hosted externally, so there is no web server; keep scheduling until stopped.
+		log.Info("using S3 storage; the web server is disabled")
+	} else {
+		srv := web.New(cfg.Server, storage, database)
+		srv.SetFeedCount(reloader.FeedCount)
+
+		group.Go(func() error {
+			log.Infof("running listener at %s", srv.Addr)
+			if cfg.Server.TLS {
+				return srv.ListenAndServeTLS(cfg.Server.CertificatePath, cfg.Server.KeyFilePath)
+			}
+			return srv.ListenAndServe()
+		})
+		group.Go(func() error {
+			<-ctx.Done()
+			ctxShutDown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelShutdown()
+			log.Info("shutting down web server")
+			if err := srv.Shutdown(ctxShutDown); err != nil {
+				log.WithError(err).Error("server shutdown failed")
+			}
+			return ctx.Err()
+		})
+	}
+
+	if err := group.Wait(); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
 		log.WithError(err).Error("wait error")
 	}
-	if scheduler != nil {
-		scheduler.Stop()
-	}
 }
+
+// configWatchInterval is how often the configuration file is checked for changes.
+const configWatchInterval = 5 * time.Second
 
 func logGlobalSyncSummary(summaries []*update.FeedSyncSummary, duration time.Duration) {
 	fields := log.Fields{"feeds_processed": len(summaries), "duration": duration}

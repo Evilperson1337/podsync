@@ -30,6 +30,18 @@ At the start of an update run, [`(*Manager).reconcileFeedState()`](../services/u
 
 When [Audiobookshelf export](./audiobookshelf.md) is enabled for a feed, [`(*Manager).reconcileAudiobookshelf()`](../services/update/updater.go) runs after cleanup and ensures every retained (`stored` / `published`) episode is hardlinked into the configured Audiobookshelf directory. This backfills episodes downloaded before export was enabled and retries earlier export failures. Export failures are logged and counted but never change episode state. Podsync records each link's device and inode on the episode (`audiobookshelf_link`). With that record, the same pass mirrors deletions in both directions: an episode deleted in Audiobookshelf (its Podsync file's link count has dropped to 1) has its Podsync file removed and is marked `cleaned`, and an episode whose Podsync file was deleted has its recorded Audiobookshelf link removed. Cleanup removes the Audiobookshelf hardlink (after verifying it is the same inode) before deleting the Podsync file.
 
+## Configuration reload
+
+[`cmd/podsync/reload.go`](../cmd/podsync/reload.go) reloads the configuration file when it changes (polled every few seconds, applied once the file stops changing) or on `SIGHUP`. A reload that fails to load or validate is logged and the running configuration is kept.
+
+On a successful reload:
+
+- API key providers are rebuilt and swapped into the updater with [`(*Manager).SetKeys()`](../services/update/updater.go); feed builds read keys at call time.
+- Feeds are swapped with [`(*Manager).SetFeeds()`](../services/update/updater.go), which also updates the OPML feed list, and an OPML rebuild is requested.
+- The cron schedule is reconciled by `feedSchedule.Apply`: removed feeds are unscheduled, changed feeds are rescheduled, and new feeds are scheduled and get an initial update. Updates already queued or running keep the configuration they started with.
+
+Server, storage, database, downloader, log, signatures and global Audiobookshelf settings are read only at startup; a warning is logged when they change.
+
 ## Scheduling and execution
 
 Feed execution is coordinated by [`services/update/scheduler.go`](../services/update/scheduler.go).

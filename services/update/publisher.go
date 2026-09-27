@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -19,8 +20,22 @@ type PublicationService struct {
 	db        db.Storage
 	fs        fs.Storage
 	publisher *fs.Publisher
+	feedsMu   sync.RWMutex
 	feeds     map[string]*feed.Config
 	hostname  string
+}
+
+// SetFeeds replaces the feeds included in OPML, e.g. after a configuration reload.
+func (p *PublicationService) SetFeeds(feeds map[string]*feed.Config) {
+	p.feedsMu.Lock()
+	defer p.feedsMu.Unlock()
+	p.feeds = feeds
+}
+
+func (p *PublicationService) currentFeeds() map[string]*feed.Config {
+	p.feedsMu.RLock()
+	defer p.feedsMu.RUnlock()
+	return p.feeds
 }
 
 func NewPublicationService(database db.Storage, storage fs.Storage, feeds map[string]*feed.Config, hostname string) *PublicationService {
@@ -78,7 +93,7 @@ func (p *PublicationService) PublishFeedXML(ctx context.Context, feedConfig *fee
 func (p *PublicationService) PublishOPML(ctx context.Context) error {
 	logger := loggerWithExecution(ctx, log.Fields{})
 	logger.Debug("building podcast OPML")
-	opmlText, err := feed.BuildOPML(ctx, p.feeds, p.db, p.hostname)
+	opmlText, err := feed.BuildOPML(ctx, p.currentFeeds(), p.db, p.hostname)
 	if err != nil {
 		return err
 	}

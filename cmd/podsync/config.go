@@ -13,6 +13,7 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
+	"github.com/robfig/cron/v3"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/mxpv/podsync/pkg/audiobookshelf"
@@ -160,6 +161,12 @@ func (c *Config) validate() error {
 
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
+		}
+
+		if f.CronSchedule != "" {
+			if _, err := cron.ParseStandard(f.CronSchedule); err != nil {
+				result = multierror.Append(result, errors.Wrapf(err, "invalid cron_schedule %q for %q", f.CronSchedule, id))
+			}
 		}
 
 		if err := validateCustomFormat(id, f); err != nil {

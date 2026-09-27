@@ -192,6 +192,22 @@ directory = "Doctrine"
 
 The Audiobookshelf directory mirrors Podsync in both directions: episodes removed by Podsync cleanup (or deleted from Podsync storage) are removed from Audiobookshelf, and episodes deleted in Audiobookshelf are removed from Podsync. Podsync only deletes files it can verify are its own hardlinks. See [Audiobookshelf hardlink export](./docs/audiobookshelf.md) for Docker/Unraid mappings and validation steps.
 
+### Reloading the configuration
+
+Podsync applies configuration changes without a restart. It checks the configuration file every few seconds and reloads it after a change, and it also reloads on `SIGHUP` (`docker kill -s HUP <container>`).
+
+- **Applied immediately:** feeds (added, removed or changed, including filters, signature rules and Audiobookshelf settings), API tokens, and the global `[cleanup]` policy. A new feed gets an initial update right away.
+- **Needs a restart:** `[server]`, `[storage]`, `[database]`, `[downloader]`, `[log]`, `[signatures]` and the global `[audiobookshelf]` section. Podsync logs a warning when these change.
+- **Invalid changes are rejected:** if the edited file does not load (a typo, a half-saved file), Podsync logs why and keeps running with the previous configuration.
+- Removing a feed stops its updates. Its downloaded episodes stay in storage.
+- Disable file watching with `--no-config-watch` (or `PODSYNC_NO_CONFIG_WATCH=true`); `SIGHUP` still reloads.
+
+In Docker, mount the directory that contains the configuration rather than the file itself: many editors save by replacing the file, and a single-file bind mount keeps showing the old version inside the container.
+
+```bash
+docker run -v /srv/podsync/config:/app/config -e PODSYNC_CONFIG_PATH=/app/config/config.toml ...
+```
+
 ### 🌍 Environment Variables
 
 Podsync supports the following environment variables for configuration and API keys:
