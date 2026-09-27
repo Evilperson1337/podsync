@@ -42,3 +42,24 @@ func TestBestPeakRatio(t *testing.T) {
 		t.Fatalf("expected ratio 3.0, got %f", ratio)
 	}
 }
+
+func TestSeparatedPeaks(t *testing.T) {
+	scores := []float64{0.1, 0.9, 0.85, 0.2, 0.1, 0.8, 0.7, 0.1, 0.1, 0.6}
+
+	peaks := SeparatedPeaks(scores, 3, 10)
+	offsets := make([]int, 0, len(peaks))
+	for _, peak := range peaks {
+		offsets = append(offsets, peak.Offset)
+	}
+	// 2 is suppressed by 1, 6 by 5; 9 is far enough from 5.
+	if len(offsets) != 3 || offsets[0] != 1 || offsets[1] != 5 || offsets[2] != 9 {
+		t.Fatalf("unexpected peaks: %v", offsets)
+	}
+
+	if got := SeparatedPeaks(scores, 3, 2); len(got) != 2 {
+		t.Fatalf("expected limit to cap peaks, got %d", len(got))
+	}
+	if got := SeparatedPeaks(nil, 3, 2); len(got) != 0 {
+		t.Fatalf("expected no peaks for empty scores, got %d", len(got))
+	}
+}

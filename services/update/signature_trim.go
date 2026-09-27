@@ -190,74 +190,79 @@ func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.
 	}
 	logger = logger.WithField("input", inputPath)
 	logger.Debug("[trim] Signature detection started")
+
+	// The episode is decoded once, on first use, and shared by every rule.
+	var analysis *audiosig.InputAnalysis
 	var detected []matchedRule
-	var inputDur time.Duration
 	for idx, rule := range rules.Rules {
+		ruleLogger := logger.WithFields(log.Fields{"rule_index": idx, "rule_file": rule.File, "rule_action": rule.Action})
 		if rule.File == "" || rule.Action == "" {
-			logger.WithField("rule_index", idx).Debug("[trim] Invalid rule; skipping")
+			ruleLogger.Debug("[trim] Invalid rule; skipping")
 			continue
 		}
 		sigPath := filepath.Join(sigDir, rule.File)
+		ruleLogger = ruleLogger.WithField("signature", sigPath)
 		if info, err := os.Stat(sigPath); err != nil {
 			if os.IsNotExist(err) {
-				logger.WithFields(log.Fields{
-					"rule_index": idx,
-					"rule_file":  rule.File,
-					"signature":  sigPath,
-				}).Debug("[trim] Signature file missing; skipping rule")
+				ruleLogger.Debug("[trim] Signature file missing; skipping rule")
 				continue
 			}
 			return nil, 0, fmt.Errorf("stat signature file: %w", err)
 		} else if info.Size() == 0 {
-			logger.WithFields(log.Fields{
-				"rule_index": idx,
-				"rule_file":  rule.File,
-				"signature":  sigPath,
-			}).Debug("[trim] Signature file empty; skipping rule")
+			ruleLogger.Debug("[trim] Signature file empty; skipping rule")
 			continue
 		}
-		logger.WithFields(log.Fields{
-			"rule_index":  idx,
-			"rule_file":   rule.File,
-			"rule_action": rule.Action,
-			"rule_pre":    rule.PreSeconds,
-			"rule_post":   rule.PostSeconds,
-			"signature":   sigPath,
+		maxMatches := rule.maxMatches()
+		ruleLogger.WithFields(log.Fields{
+			"rule_pre":         rule.PreSeconds,
+			"rule_post":        rule.PostSeconds,
+			"rule_max_matches": maxMatches,
 		}).Debug("[trim] Evaluating trim rule")
 
-		logger = logger.WithField("input", inputPath)
-		logger.Debug("[trim] Signature detection started")
-		result, err := audiosig.Detect(ctx, inputPath, sigPath, cfg)
+		if analysis == nil {
+			if analysis, err = audiosig.AnalyzeInput(ctx, inputPath, cfg); err != nil {
+				return nil, 0, fmt.Errorf("signature analysis failed: %w", err)
+			}
+		}
+		results, err := detectRule(ctx, analysis, sigPath, maxMatches)
 		if err != nil {
 			return nil, 0, fmt.Errorf("signature detect failed: %w", err)
 		}
-		if !result.MatchFound {
-			logger.WithField("rule_index", idx).Debug("[trim] Signature not detected for rule")
+		if len(results) == 0 {
+			ruleLogger.Debug("[trim] Signature not detected for rule")
 			continue
 		}
-		if inputDur == 0 {
-			inputDur = result.InputDuration
+		for _, result := range results {
+			ruleLogger.WithFields(log.Fields{
+				"signature_start": result.SignatureStart,
+				"signature_end":   result.SignatureEnd,
+				"split_at":        result.SplitAt,
+				"confidence":      result.ConfidenceScore,
+			}).Info("[trim] Signature match found")
+			detected = append(detected, matchedRule{rule: rule, result: result})
 		}
-		logger = logger.WithFields(log.Fields{
-			"signature_start": result.SignatureStart,
-			"signature_end":   result.SignatureEnd,
-			"split_at":        result.SplitAt,
-			"confidence":      result.ConfidenceScore,
-		})
-		logger.WithFields(log.Fields{
-			"rule_index":      idx,
-			"rule_action":     rule.Action,
-			"signature_start": result.SignatureStart,
-			"signature_end":   result.SignatureEnd,
-			"split_at":        result.SplitAt,
-			"confidence":      result.ConfidenceScore,
-		}).Info("[trim] Signature match found")
-		detected = append(detected, matchedRule{rule: rule, result: result})
 	}
 	if len(detected) == 0 {
 		logger.Info("[trim] No matching signature trim rules found")
 	}
+	var inputDur time.Duration
+	if analysis != nil {
+		inputDur = analysis.Duration()
+	}
 	return detected, inputDur, nil
+}
+
+// detectRule returns the matched occurrences of one signature: the single best match by default,
+// or up to maxMatches occurrences when the rule asks for more.
+func detectRule(ctx context.Context, analysis *audiosig.InputAnalysis, sigPath string, maxMatches int) ([]audiosig.Result, error) {
+	if maxMatches > 1 {
+		return analysis.DetectAll(ctx, sigPath, maxMatches)
+	}
+	result, err := analysis.Detect(ctx, sigPath)
+	if err != nil || !result.MatchFound {
+		return nil, err
+	}
+	return []audiosig.Result{result}, nil
 }
 
 func (u *Manager) collectSponsorBlockMatches(ctx context.Context, feedConfig *feed.Config, episode *model.Episode, logger log.FieldLogger) ([]matchedRule, error) {

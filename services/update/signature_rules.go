@@ -26,6 +26,7 @@ type SignatureRules struct {
 // - Action: cut_before | cut_after | remove_segment.
 // - PreSeconds: seconds before signature_start for padding.
 // - PostSeconds: seconds after signature_end for padding.
+// - MaxMatches: occurrences to act on (default 1).
 // Outputs: none.
 // Example usage:
 //
@@ -37,6 +38,16 @@ type SignatureRule struct {
 	Action      string  `json:"action"`
 	PreSeconds  float64 `json:"pre"`
 	PostSeconds float64 `json:"post"`
+	// MaxMatches is how many occurrences of the signature to act on. Values below 2 use only the
+	// strongest match; higher values find repeated occurrences (e.g. a stinger before every ad break).
+	MaxMatches int `json:"max_matches,omitempty"`
+}
+
+func (r SignatureRule) maxMatches() int {
+	if r.MaxMatches < 1 {
+		return 1
+	}
+	return r.MaxMatches
 }
 
 // ResolveSignaturesRoot returns the directory holding per-feed signature folders

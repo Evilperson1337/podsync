@@ -86,6 +86,55 @@ func TopKPeaks(scores []float64, k int) []Peak {
 	return peaks
 }
 
+// SeparatedPeaks returns up to limit peaks, strongest first, with every pair of chosen peaks at
+// least minSeparation offsets apart (greedy non-maximum suppression).
+// Inputs:
+// - scores: per-offset scores.
+// - minSeparation: minimum distance between chosen offsets (values below 1 are treated as 1).
+// - limit: maximum peaks to return.
+// Outputs:
+// - peaks sorted descending by score.
+// Example usage:
+//
+//	candidates := SeparatedPeaks(scores, len(signatureEnvelope), 10)
+//
+// Notes: Used to find repeated occurrences, where TopKPeaks would return neighbors of one peak.
+func SeparatedPeaks(scores []float64, minSeparation int, limit int) []Peak {
+	if limit <= 0 || len(scores) == 0 {
+		return []Peak{}
+	}
+	if minSeparation < 1 {
+		minSeparation = 1
+	}
+	order := make([]int, len(scores))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool { return scores[order[i]] > scores[order[j]] })
+
+	chosen := make([]Peak, 0, limit)
+	for _, offset := range order {
+		if len(chosen) >= limit {
+			break
+		}
+		separated := true
+		for _, peak := range chosen {
+			distance := offset - peak.Offset
+			if distance < 0 {
+				distance = -distance
+			}
+			if distance < minSeparation {
+				separated = false
+				break
+			}
+		}
+		if separated {
+			chosen = append(chosen, Peak{Offset: offset, Score: scores[offset]})
+		}
+	}
+	return chosen
+}
+
 // BestPeakRatio computes best/second-best ratio for a peak list.
 // Inputs: peaks sorted descending by score.
 // Outputs:

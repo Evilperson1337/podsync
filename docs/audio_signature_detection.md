@@ -41,7 +41,7 @@ Place `rules.json` in `<signatures_root>/<feed_id>/signatures/`:
 {
   "rules": [
     {"file": "intro.wav", "action": "cut_before", "pre": 0, "post": 0},
-    {"file": "segment.wav", "action": "remove_segment", "pre": 5, "post": 10},
+    {"file": "segment.wav", "action": "remove_segment", "pre": 5, "post": 10, "max_matches": 10},
     {"file": "outro.wav", "action": "cut_after", "pre": 0, "post": 0}
   ]
 }
@@ -53,6 +53,7 @@ Fields:
 - `file`: signature audio file name, relative to the same `signatures` directory.
 - `action`: one of the actions below.
 - `pre` / `post`: padding in seconds, applied as described per action.
+- `max_matches` (optional, default `1`): how many occurrences of the signature to act on. By default only the strongest match is used. Set it higher for signatures that repeat, such as a stinger before every ad break with `remove_segment`.
 
 Actions:
 - `cut_before`: remove everything before `signature_end + post`.
@@ -62,7 +63,7 @@ Actions:
 All matched rules are combined into one trim plan, and overlapping removals are merged.
 
 Current limits of the Podsync integration:
-- Each rule matches at most once per episode: the strongest occurrence. A signature that repeats (for example, before every ad break) is only removed once.
+- Repeated occurrences (`max_matches` above 1) must be about 20 seconds apart or more. Occurrences closer together weaken each other's confidence score and may be skipped.
 - Match thresholds are fixed (`min-score` 0.6, `min-peak-ratio` 1.2) and cannot be set per rule. Use the CLI below to check how a signature scores.
 - On video feeds, trimming stream-copies the video, so cuts land on the nearest keyframe (usually within a few seconds). Audio-only media is re-encoded with its original codec for accurate cuts. See [Output format](#output-format).
 
@@ -158,5 +159,7 @@ These thresholds are exposed as CLI flags.
 ## Notes
 
 - The coarse pass streams the envelope so memory is bounded.
+- In Podsync, each episode is decoded for the coarse pass once, and every rule's signature is matched against that single analysis (`audiosig.AnalyzeInput`).
+- For `max_matches` above 1, candidates are taken strongest first, at least one signature length apart, and each is confirmed with the same refine pass and thresholds. The search stops after `top-k` consecutive candidates fail to confirm.
 - The refine pass decodes only small windows for speed.
 - Trimming defaults to re-encode for sample-accurate cuts and uses the input bitrate when possible.
