@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -68,16 +69,33 @@ type Log struct {
 	Debug bool `toml:"debug"`
 }
 
+// ErrConfigNotFound is returned by LoadConfig when the configuration file does not exist.
+var ErrConfigNotFound = errors.New("configuration file not found")
+
 // LoadConfig loads TOML configuration from a file path
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.Wrapf(ErrConfigNotFound, "%s", path)
+		}
 		return nil, errors.Wrapf(err, "failed to read config file: %s", path)
 	}
 
+	tree, err := toml.LoadBytes(data)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse %s", path)
+	}
 	config := Config{}
-	if err := toml.Unmarshal(data, &config); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal toml")
+	if err := tree.Unmarshal(&config); err != nil {
+		return nil, errors.Wrapf(err, "failed to decode %s", path)
+	}
+	if unknown := findUnknownConfigKeys(tree, reflect.TypeOf(config)); len(unknown) > 0 {
+		keys := make([]string, 0, len(unknown))
+		for _, key := range unknown {
+			keys = append(keys, key.String())
+		}
+		return nil, errors.Errorf("unknown configuration keys in %s (check for typos or misplaced sections): %s", path, strings.Join(keys, ", "))
 	}
 
 	for id, f := range config.Feeds {
