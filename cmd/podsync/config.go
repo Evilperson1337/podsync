@@ -151,10 +151,6 @@ func (c *Config) validate() error {
 		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
 	}
 
-	if len(c.Feeds) == 0 {
-		result = multierror.Append(result, errors.New("at least one feed must be specified"))
-	}
-
 	for id, f := range c.Feeds {
 		mergeFeedCustom(f)
 
@@ -317,6 +313,12 @@ func (c *Config) applyDefaults(configPath string) {
 
 	if c.Storage.Type == "" {
 		c.Storage.Type = "local"
+	}
+
+	// Default local storage next to the config file, like the database directory. The deprecated
+	// server.data_dir still takes precedence (see validate).
+	if c.Storage.Type == "local" && c.Storage.Local.DataDir == "" && c.Server.DataDir == "" {
+		c.Storage.Local.DataDir = filepath.Join(filepath.Dir(configPath), "data")
 	}
 
 	if c.Log.Filename != "" {

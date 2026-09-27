@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,10 +30,12 @@ import (
 )
 
 type Opts struct {
-	ConfigPath string `long:"config" short:"c" default:"config.toml" env:"PODSYNC_CONFIG_PATH"`
-	Headless   bool   `long:"headless"`
-	Debug      bool   `long:"debug"`
-	NoBanner   bool   `long:"no-banner"`
+	ConfigPath  string `long:"config" short:"c" default:"config.toml" env:"PODSYNC_CONFIG_PATH" description:"Path to the configuration file"`
+	Headless    bool   `long:"headless" description:"Run one update of every feed, then exit (no web server)"`
+	Debug       bool   `long:"debug" description:"Enable debug logging"`
+	NoBanner    bool   `long:"no-banner" description:"Do not print the startup banner"`
+	CheckConfig bool   `long:"check-config" description:"Validate the configuration file and exit"`
+	Init        bool   `long:"init" description:"Write a starter configuration file to the --config path and exit"`
 }
 
 const banner = `
@@ -69,11 +72,27 @@ func main() {
 	opts := Opts{}
 	_, err := flags.Parse(&opts)
 	if err != nil {
+		var flagsErr *flags.Error
+		if errors.As(err, &flagsErr) && flagsErr.Type == flags.ErrHelp {
+			return // help was printed
+		}
 		log.WithError(err).Fatal("failed to parse command line arguments")
 	}
 
 	if opts.Debug {
 		log.SetLevel(log.DebugLevel)
+	}
+
+	if opts.Init {
+		if err := writeStarterConfig(opts.ConfigPath); err != nil {
+			exitWithError(fmt.Sprintf("failed to create starter configuration: %v", err))
+		}
+		fmt.Printf("Created starter configuration at %s\nAdd your feeds to it, then start Podsync.\n", absPath(opts.ConfigPath))
+		return
+	}
+
+	if opts.CheckConfig {
+		os.Exit(runCheckConfig(ctx, opts.ConfigPath))
 	}
 
 	if !opts.NoBanner {
@@ -89,9 +108,16 @@ func main() {
 
 	// Load TOML file
 	log.Debugf("loading configuration %q", opts.ConfigPath)
-	cfg, err := LoadConfig(opts.ConfigPath)
+	cfg, created, err := loadStartupConfig(opts.ConfigPath)
 	if err != nil {
-		log.WithError(err).Fatal("failed to load configuration file")
+		exitWithError(err.Error())
+	}
+	if created {
+		log.Warnf("No configuration file was found, so a starter configuration was created at %s. Add your feeds to it and restart Podsync.", absPath(opts.ConfigPath))
+		log.Warn("In Docker, mount the file (for example -v /path/to/config.toml:/app/config.toml) so your changes survive container restarts.")
+	}
+	if len(cfg.Feeds) == 0 {
+		log.Warnf("No feeds are configured in %s. Podsync is running but has nothing to sync; add [feeds.<id>] sections and restart.", absPath(opts.ConfigPath))
 	}
 
 	if cfg.Log.Filename != "" {
@@ -335,6 +361,53 @@ func fieldsInt(fields log.Fields, key string) int {
 		return value
 	}
 	return 0
+}
+
+// loadStartupConfig loads the configuration for a normal run. When the file does not exist, it
+// writes a starter configuration (if the directory exists) and loads that instead.
+func loadStartupConfig(path string) (*Config, bool, error) {
+	cfg, err := LoadConfig(path)
+	if err == nil || !errors.Is(err, ErrConfigNotFound) {
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to load configuration: %w", err)
+		}
+		return cfg, false, nil
+	}
+	if writeErr := writeStarterConfig(path); writeErr != nil {
+		return nil, false, fmt.Errorf("%s\n\nA starter configuration could not be created automatically: %v", missingConfigHelp(absPath(path)), writeErr)
+	}
+	cfg, err = LoadConfig(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to load generated starter configuration: %w", err)
+	}
+	return cfg, true, nil
+}
+
+// runCheckConfig validates the configuration and runtime dependencies without starting Podsync.
+// It returns the process exit code.
+func runCheckConfig(ctx context.Context, path string) int {
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		if errors.Is(err, ErrConfigNotFound) {
+			fmt.Fprintln(os.Stderr, missingConfigHelp(absPath(path)))
+		} else {
+			fmt.Fprintf(os.Stderr, "Configuration is invalid: %v\n", err)
+		}
+		return 1
+	}
+	if err := validateRuntimeDependencies(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Configuration is valid, but a runtime dependency is missing: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Configuration OK: %s (%d feeds)\n", absPath(path), len(cfg.Feeds))
+	return 0
+}
+
+// exitWithError prints a (possibly multi-line) message to stderr and exits. Unlike log.Fatal,
+// it keeps line breaks readable.
+func exitWithError(message string) {
+	fmt.Fprintln(os.Stderr, message)
+	os.Exit(1)
 }
 
 func validateRuntimeDependencies(ctx context.Context, cfg *Config) error {

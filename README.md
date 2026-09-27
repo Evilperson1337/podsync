@@ -185,7 +185,7 @@ Podsync supports the following environment variables for configuration and API k
 
 | Variable Name                | Description                                                                               | Example Value(s)                              |
 |------------------------------|-------------------------------------------------------------------------------------------|-----------------------------------------------|
-| `PODSYNC_CONFIG_PATH`        | Path to the configuration file (overrides `--config` CLI flag)                            | `/app/config.toml`                            |
+| `PODSYNC_CONFIG_PATH`        | Path to the configuration file (used when `--config` is not passed)                      | `/app/config.toml`                            |
 | `PODSYNC_YOUTUBE_API_KEY`    | YouTube API key(s), space-separated for rotation                                          | `key1` or `key1 key2 key3` |
 | `PODSYNC_VIMEO_API_KEY`      | Vimeo API key(s), space-separated for rotation                                            | `key1` or `key1 key2`        |
 | `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
@@ -211,14 +211,30 @@ If you do not see any update activity after startup, the most common causes are:
 - provider API credentials are missing,
 - or your feeds are configured with a schedule you are not expecting.
 
-### 1. Create a minimal configuration
+### 1. Create a configuration
 
-You need a [`config.toml`](README.md) file that defines:
+Podsync reads its settings from a `config.toml` file. The easiest way to get one is to let Podsync write a starter file:
 
-- a web server port,
-- local storage,
-- API tokens if required by the provider,
-- and at least one feed under `[feeds]`.
+```bash
+podsync --init --config config.toml
+```
+
+If you start Podsync and no configuration file exists at the `--config` path (default `config.toml`), it writes the same starter file there, logs where it was written, and keeps running with no feeds. Edit the file to add your feeds, then restart. In Docker, mount the file (see below) so your edits survive container restarts.
+
+A configuration needs:
+
+- API tokens for providers that require them,
+- and at least one feed under `[feeds]` to actually sync anything.
+
+The web server port defaults to 8080, and local storage defaults to a `data` directory next to the config file (`/app/data` in Docker).
+
+Check a configuration without starting the server:
+
+```bash
+podsync --check-config --config config.toml
+```
+
+This reports invalid values, unknown keys (for example a misspelled option, reported with its line number), and missing runtime tools such as `ffmpeg`, then exits.
 
 Minimal example:
 
