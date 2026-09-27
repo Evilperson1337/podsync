@@ -98,4 +98,5 @@ sponsorBlockCategories = ["sponsor", "intro", "outro"]
 - If the SponsorBlock API fails or returns malformed data, Podsync logs the issue and continues without SponsorBlock trimming.
 - SponsorBlock categories are filtered per feed using the configured category list.
 - SponsorBlock segments are sorted, overlapping ranges are merged, and then combined with existing signature trim operations into a single trim plan before ffmpeg processing begins.
+- Trimmed episodes keep the feed's format. On video feeds, the video is stream-copied, so cuts snap to the nearest keyframe and a second or two of a segment may remain. See [Output format](audio_signature_detection.md#output-format).
 - Existing trim functionality remains active and continues to work when SponsorBlock is not configured.

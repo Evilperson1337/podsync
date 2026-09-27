@@ -64,7 +64,19 @@ All matched rules are combined into one trim plan, and overlapping removals are 
 Current limits of the Podsync integration:
 - Each rule matches at most once per episode: the strongest occurrence. A signature that repeats (for example, before every ad break) is only removed once.
 - Match thresholds are fixed (`min-score` 0.6, `min-peak-ratio` 1.2) and cannot be set per rule. Use the CLI below to check how a signature scores.
-- Trimmed output is re-encoded as MP3 audio. Use signature trimming only on `format = "audio"` feeds.
+- On video feeds, trimming stream-copies the video, so cuts land on the nearest keyframe (usually within a few seconds). Audio-only media is re-encoded with its original codec for accurate cuts. See [Output format](#output-format).
+
+## Output format
+
+Trimmed episodes keep the container and codecs Podsync publishes for the feed. The same rules apply to SponsorBlock trimming.
+
+| Downloaded media | How segments are written |
+| --- | --- |
+| Audio (`mp3`, `aac`/`m4a`, `opus`, `vorbis`, `flac`, `alac`, `wav`) | Re-encoded with the same codec, at the source bitrate where it applies. Cuts are sample-accurate. |
+| Video (`format = "video"`, or a custom video format) | Video and audio are stream-copied, with no re-encoding. Cuts snap to the nearest keyframe. |
+| Other audio codecs | Stream-copied, never converted to another format. |
+
+The chosen encoding is logged as `[trim] Selected trim output encoding`.
 
 ## Requirements
 

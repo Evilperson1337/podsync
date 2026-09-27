@@ -83,7 +83,8 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 	}
 
 	logger.WithFields(log.Fields{"matched_rules": len(matches), "input_bytes": inputBytes, "input_duration": inputDur}).Info("[trim] Applying planned trim rules")
-	newInput, newCleanup, err := u.applyMatchedRules(ctx, inputPath, inputDur, matches, logger)
+	extension := filepath.Ext(feed.EpisodeName(feedConfig, episode))
+	newInput, newCleanup, err := u.applyMatchedRules(ctx, inputPath, inputDur, matches, extension, logger)
 	if err != nil {
 		if inputCleanup != nil {
 			inputCleanup()
