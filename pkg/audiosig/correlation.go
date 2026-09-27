@@ -30,7 +30,8 @@ type Peak struct {
 //
 //	scores := CorrelateNormalized(signal, pattern)
 //
-// Notes: Uses O(n*m) and is intended for envelope-level sizes.
+// Notes: Short patterns use a direct O(n*m) loop; long patterns (see fftMinPatternLength) use
+// FFT in O(n log n) with equivalent results.
 func CorrelateNormalized(signal []float64, pattern []float64) []float64 {
 	if len(signal) == 0 || len(pattern) == 0 || len(signal) < len(pattern) {
 		return []float64{}
@@ -43,6 +44,13 @@ func CorrelateNormalized(signal []float64, pattern []float64) []float64 {
 		return []float64{}
 	}
 	patEnergy = math.Sqrt(patEnergy)
+	if len(pattern) >= fftMinPatternLength {
+		return correlateNormalizedFFT(signal, pattern, patEnergy)
+	}
+	return correlateNormalizedDirect(signal, pattern, patEnergy)
+}
+
+func correlateNormalizedDirect(signal []float64, pattern []float64, patEnergy float64) []float64 {
 	maxOffset := len(signal) - len(pattern)
 	scores := make([]float64, maxOffset+1)
 	for offset := 0; offset <= maxOffset; offset++ {
