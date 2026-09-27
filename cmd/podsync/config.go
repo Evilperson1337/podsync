@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/pelletier/go-toml"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
@@ -72,7 +71,8 @@ type Log struct {
 // ErrConfigNotFound is returned by LoadConfig when the configuration file does not exist.
 var ErrConfigNotFound = errors.New("configuration file not found")
 
-// LoadConfig loads TOML configuration from a file path
+// LoadConfig loads configuration from a file path. The format (TOML, YAML or JSON) is chosen by
+// the file extension, and PODSYNC__SECTION__KEY environment variables override file values.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -82,11 +82,15 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, errors.Wrapf(err, "failed to read config file: %s", path)
 	}
 
-	tree, err := toml.LoadBytes(data)
+	format := configFormatFor(path)
+	tree, err := parseConfigTree(format, data)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to parse %s", path)
+		return nil, errors.Wrapf(err, "failed to parse %s as %s", path, strings.ToUpper(string(format)))
 	}
 	config := Config{}
+	if err := applyConfigEnvOverrides(tree, reflect.TypeOf(config), os.Environ()); err != nil {
+		return nil, err
+	}
 	if err := tree.Unmarshal(&config); err != nil {
 		return nil, errors.Wrapf(err, "failed to decode %s", path)
 	}
@@ -527,6 +531,11 @@ func (c *Config) applyEnv() {
 type StringSlice []string
 
 func (s *StringSlice) UnmarshalTOML(v interface{}) error {
+	// Trees built from YAML/JSON (toml.TreeFromMap) hold typed string lists.
+	if list, ok := v.([]string); ok {
+		*s = append([]string(nil), list...)
+		return nil
+	}
 	if list, ok := v.([]interface{}); ok {
 		result := make([]string, 0, len(list))
 		for _, entry := range list {

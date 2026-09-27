@@ -80,6 +80,19 @@ In order to query YouTube or Vimeo API you have to obtain an API token first.
 You need to create a configuration file (for instance `config.toml`) and specify the list of feeds that you're going to host.
 See [config.toml.example](./config.toml.example) for all possible configuration keys available in Podsync.
 
+Configuration files can be written in TOML (default), YAML (`.yaml`/`.yml`) or JSON (`.json`); the format is chosen by the file extension, and every format uses the same keys and nesting. When the default `config.toml` does not exist, Podsync also looks for `config.yaml`, `config.yml` or `config.json` next to it. Unknown keys are rejected at startup in every format. For example, in YAML:
+
+```yaml
+server:
+  port: 8080
+tokens:
+  youtube: PASTE YOUR API KEY HERE
+feeds:
+  ID1:
+    url: https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ
+    update_period: 12h
+```
+
 Minimal configuration would look like this:
 
 ```toml
@@ -190,6 +203,25 @@ Podsync supports the following environment variables for configuration and API k
 | `PODSYNC_VIMEO_API_KEY`      | Vimeo API key(s), space-separated for rotation                                            | `key1` or `key1 key2`        |
 | `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
 | `PODSYNC_TWITCH_API_KEY`     | Twitch API credentials in the format `CLIENT_ID:CLIENT_SECRET`, space-separated for multi | `id1:secret1 id2:secret2`                     |
+| `PODSYNC__<SECTION>__<KEY>`  | Override any configuration key (see below)                                                | `PODSYNC__SERVER__PORT=9000`                  |
+
+#### Overriding configuration keys
+
+Any configuration key can be set from the environment with `PODSYNC__` followed by the key path, using a double underscore between levels. Overrides apply on top of the configuration file, whatever its format:
+
+```bash
+PODSYNC__SERVER__PORT=9000                      # [server] port
+PODSYNC__SERVER__HOSTNAME=https://pod.example.com
+PODSYNC__STORAGE__LOCAL__DATA_DIR=/data/podsync  # [storage.local] data_dir
+PODSYNC__TOKENS__YOUTUBE="key1 key2"             # space-separated keys rotate
+PODSYNC__FEEDS__DOCTRINE__PAGE_SIZE=5            # [feeds.doctrine] page_size
+PODSYNC__FEEDS__DOCTRINE__YOUTUBE_DL_ARGS="--embed-thumbnail,--no-mtime"  # comma-separated lists
+```
+
+- Names are case-insensitive. A feed ID that already exists in the file keeps its spelling (`DOCTRINE` matches `[feeds.Doctrine]`); a new feed ID from the environment is lowercase.
+- Values are converted to the option's type: numbers, `true`/`false`, durations such as `6h`, and comma-separated lists. Lists of tables, such as `signature_rules` and hooks, can only be set in the file.
+- An unknown key or an invalid value stops startup with an error that names the variable. Override values are never logged.
+- The older `PODSYNC_<PROVIDER>_API_KEY` variables are applied last, so they win over `PODSYNC__TOKENS__*`.
 
 ## 🚀 Getting started
 

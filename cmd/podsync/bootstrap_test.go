@@ -121,3 +121,19 @@ func TestLoadConfig_DataDirDefaults(t *testing.T) {
 		assert.Equal(t, "/legacy", cfg.Storage.Local.DataDir)
 	})
 }
+
+func TestResolveConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	defaultPath := filepath.Join(dir, "config.toml")
+	assert.Equal(t, defaultPath, resolveConfigPath(defaultPath), "nothing exists: keep the default")
+
+	yamlPath := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(yamlPath, []byte("{}"), 0644))
+	assert.Equal(t, yamlPath, resolveConfigPath(defaultPath), "a YAML file next to a missing default is used")
+
+	require.NoError(t, os.WriteFile(defaultPath, []byte(""), 0644))
+	assert.Equal(t, defaultPath, resolveConfigPath(defaultPath), "an existing config.toml always wins")
+
+	custom := filepath.Join(dir, "podsync.toml")
+	assert.Equal(t, custom, resolveConfigPath(custom), "explicit non-default paths are never changed")
+}

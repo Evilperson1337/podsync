@@ -83,6 +83,10 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
+	if !opts.Init {
+		opts.ConfigPath = resolveConfigPath(opts.ConfigPath)
+	}
+
 	if opts.Init {
 		if err := writeStarterConfig(opts.ConfigPath); err != nil {
 			exitWithError(fmt.Sprintf("failed to create starter configuration: %v", err))
