@@ -43,7 +43,7 @@ func (u *Manager) trimEpisodeIfSignatureFound(ctx context.Context, feedConfig *f
 	if episode == nil || feedConfig == nil {
 		return source, nil, nil
 	}
-	if u.sigDir == "" && !feedConfig.Custom.SponsorBlockConfig().Enabled {
+	if u.sigDir == "" && len(feedConfig.SignatureRules) == 0 && !feedConfig.Custom.SponsorBlockConfig().Enabled {
 		return source, nil, nil
 	}
 	logger := log.WithFields(log.Fields{"feed_id": feedConfig.ID, "episode_id": episode.ID, "signatures_root": u.sigDir})
@@ -160,21 +160,25 @@ func (u *Manager) collectTrimMatches(ctx context.Context, feedConfig *feed.Confi
 	return matches, inputDur, nil
 }
 
+// Default signature match thresholds; rules may override them.
+const (
+	defaultSignatureMinScore     = 0.6
+	defaultSignatureMinPeakRatio = 1.2
+)
+
 func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.Config, inputPath string, logger log.FieldLogger) ([]matchedRule, time.Duration, error) {
-	if u.sigDir == "" {
-		return nil, 0, nil
-	}
-	sigDir := filepath.Join(u.sigDir, feedConfig.ID, "signatures")
-	rulesPath := filepath.Join(sigDir, "rules.json")
-	rules, ok, err := ReadSignatureRules(rulesPath)
+	rules, source, rulesJSONIgnored, err := LoadFeedSignatureRules(u.sigDir, feedConfig)
 	if err != nil {
 		return nil, 0, err
 	}
-	if !ok || len(rules.Rules) == 0 {
+	if rulesJSONIgnored {
+		logger.WithField("rules_path", SignatureRulesPath(u.sigDir, feedConfig.ID)).Warn("[trim] rules.json ignored because signature_rules are configured for this feed")
+	}
+	if len(rules) == 0 {
 		logger.Info("[trim] No signature trim rules configured")
 		return nil, 0, nil
 	}
-	logger.WithFields(log.Fields{"rules_path": rulesPath, "rules": len(rules.Rules)}).Info("[trim] Loaded signature trim rules")
+	logger.WithFields(log.Fields{"rules_source": source, "rules": len(rules)}).Info("[trim] Loaded signature trim rules")
 
 	cfg := audiosig.Config{
 		CoarseSampleRate: 4000,
@@ -185,8 +189,8 @@ func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.
 		FinalMargin:      750 * time.Millisecond,
 		ExtraPad:         0,
 		TopK:             5,
-		MinScore:         0.6,
-		MinPeakRatio:     1.2,
+		MinScore:         defaultSignatureMinScore,
+		MinPeakRatio:     defaultSignatureMinPeakRatio,
 	}
 	logger = logger.WithField("input", inputPath)
 	logger.Debug("[trim] Signature detection started")
@@ -194,29 +198,35 @@ func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.
 	// The episode is decoded once, on first use, and shared by every rule.
 	var analysis *audiosig.InputAnalysis
 	var detected []matchedRule
-	for idx, rule := range rules.Rules {
-		ruleLogger := logger.WithFields(log.Fields{"rule_index": idx, "rule_file": rule.File, "rule_action": rule.Action})
-		if rule.File == "" || rule.Action == "" {
-			ruleLogger.Debug("[trim] Invalid rule; skipping")
+	for idx, rule := range rules {
+		ruleLogger := logger.WithFields(log.Fields{"rule_index": idx, "rule_file": rule.File, "rule_action": rule.Action, "rules_source": source})
+		if err := rule.Validate(); err != nil {
+			ruleLogger.WithError(err).Warn("[trim] Invalid signature rule; skipping")
 			continue
 		}
-		sigPath := filepath.Join(sigDir, rule.File)
+		sigPath := SignatureFilePath(u.sigDir, feedConfig.ID, rule.File)
+		if sigPath == "" {
+			ruleLogger.Warn("[trim] Relative signature file but no signatures root is configured; skipping rule")
+			continue
+		}
 		ruleLogger = ruleLogger.WithField("signature", sigPath)
 		if info, err := os.Stat(sigPath); err != nil {
 			if os.IsNotExist(err) {
-				ruleLogger.Debug("[trim] Signature file missing; skipping rule")
+				ruleLogger.Warn("[trim] Signature file missing; skipping rule")
 				continue
 			}
 			return nil, 0, fmt.Errorf("stat signature file: %w", err)
 		} else if info.Size() == 0 {
-			ruleLogger.Debug("[trim] Signature file empty; skipping rule")
+			ruleLogger.Warn("[trim] Signature file empty; skipping rule")
 			continue
 		}
-		maxMatches := rule.maxMatches()
+		maxMatches := rule.MaxMatchCount()
 		ruleLogger.WithFields(log.Fields{
-			"rule_pre":         rule.PreSeconds,
-			"rule_post":        rule.PostSeconds,
-			"rule_max_matches": maxMatches,
+			"rule_pre":            rule.PreSeconds,
+			"rule_post":           rule.PostSeconds,
+			"rule_max_matches":    maxMatches,
+			"rule_min_score":      rule.MinScore,
+			"rule_min_peak_ratio": rule.MinPeakRatio,
 		}).Debug("[trim] Evaluating trim rule")
 
 		if analysis == nil {
@@ -224,7 +234,8 @@ func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.
 				return nil, 0, fmt.Errorf("signature analysis failed: %w", err)
 			}
 		}
-		results, err := detectRule(ctx, analysis, sigPath, maxMatches)
+		ruleAnalysis := analysis.WithThresholds(rule.MinScore, rule.MinPeakRatio)
+		results, err := detectRule(ctx, ruleAnalysis, sigPath, maxMatches)
 		if err != nil {
 			return nil, 0, fmt.Errorf("signature detect failed: %w", err)
 		}

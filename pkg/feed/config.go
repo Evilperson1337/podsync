@@ -62,6 +62,9 @@ type Config struct {
 	PrivateFeed bool `toml:"private_feed"`
 	// Playlist sort
 	PlaylistSort model.Sorting `toml:"playlist_sort"`
+	// SignatureRules configures audio signature trimming for this feed. When set, it replaces
+	// <signatures_root>/<feed_id>/signatures/rules.json.
+	SignatureRules []SignatureRule `toml:"signature_rules"`
 	// Audiobookshelf hardlink export for this feed (requires the global [audiobookshelf] section)
 	Audiobookshelf audiobookshelf.FeedConfig `toml:"audiobookshelf"`
 }

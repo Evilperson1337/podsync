@@ -139,14 +139,21 @@ Hook commands are now platform-aware. Multi-argument commands execute directly. 
 
 ### Signature configuration
 
-Audio signature trimming is built into the standard binary and Docker image. It runs for a feed only when `<signatures_root>/<feed_id>/signatures/rules.json` exists. The signatures root defaults to the local storage `data_dir`, and can be set explicitly:
+Audio signature trimming is built into the standard binary and Docker image. Configure rules per feed:
 
 ```toml
-[signatures]
-root_dir = "/app/data"
+[[feeds.ID1.signature_rules]]
+file = "intro.wav"          # relative to <signatures_root>/ID1/signatures/, or absolute
+action = "cut_before"
+
+[[feeds.ID1.signature_rules]]
+file = "ad_break.wav"
+action = "remove_segment"
+post = 60
+max_matches = 10
 ```
 
-`PODSYNC_SIGNATURES_DIR` overrides the default when `root_dir` is not set. When any feed has a `rules.json` (or SponsorBlock is enabled), Podsync checks for `ffmpeg` and `ffprobe` at startup. See [Audio signature detection](./docs/audio_signature_detection.md) for the rules format.
+Rules are validated at startup, including whether each signature file exists. The signatures root defaults to the local storage `data_dir`, and can be set with `[signatures] root_dir` or `PODSYNC_SIGNATURES_DIR`. A legacy per-feed `rules.json` is still read for feeds without `signature_rules`. When any feed uses signature trimming (or SponsorBlock), Podsync checks for `ffmpeg` and `ffprobe` at startup. See [Audio signature detection](./docs/audio_signature_detection.md) for all fields.
 
 ### Storage publication semantics
 

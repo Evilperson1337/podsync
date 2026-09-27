@@ -53,7 +53,9 @@ func setupSignatureRules(t *testing.T, feedID string, rules string) string {
 	data, err := os.ReadFile(generated)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sigDir, "signature.wav"), data, 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(sigDir, "rules.json"), []byte(rules), 0644))
+	if rules != "" {
+		require.NoError(t, os.WriteFile(filepath.Join(sigDir, "rules.json"), []byte(rules), 0644))
+	}
 	return root
 }
 
@@ -64,6 +66,7 @@ func TestSignatureTrimRemovesRepeatedSegments(t *testing.T) {
 	tests := []struct {
 		name     string
 		rules    string
+		config   []feed.SignatureRule
 		expected time.Duration
 	}{
 		{
@@ -76,11 +79,27 @@ func TestSignatureTrimRemovesRepeatedSegments(t *testing.T) {
 			rules:    `{"rules":[{"file":"signature.wav","action":"remove_segment"}]}`,
 			expected: 97 * time.Second,
 		},
+		{
+			name:     "rules from config",
+			config:   []feed.SignatureRule{{File: "signature.wav", Action: feed.SignatureActionRemoveSegment, MaxMatches: 10}},
+			expected: 91 * time.Second,
+		},
+		{
+			name:     "config rules take precedence over rules.json",
+			rules:    `{"rules":[{"file":"signature.wav","action":"remove_segment"}]}`,
+			config:   []feed.SignatureRule{{File: "signature.wav", Action: feed.SignatureActionRemoveSegment, MaxMatches: 10}},
+			expected: 91 * time.Second,
+		},
+		{
+			name:     "per-rule threshold rejects matches",
+			config:   []feed.SignatureRule{{File: "signature.wav", Action: feed.SignatureActionRemoveSegment, MaxMatches: 10, MinPeakRatio: 1000}},
+			expected: 100 * time.Second,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			feedConfig := &feed.Config{ID: "show", Format: model.FormatAudio}
+			feedConfig := &feed.Config{ID: "show", Format: model.FormatAudio, SignatureRules: tt.config}
 			manager := &Manager{sigDir: setupSignatureRules(t, feedConfig.ID, tt.rules)}
 
 			source, err := os.Open(input)
@@ -94,6 +113,10 @@ func TestSignatureTrimRemovesRepeatedSegments(t *testing.T) {
 			}
 			named, ok := reader.(interface{ Name() string })
 			require.True(t, ok)
+			if tt.expected == 100*time.Second {
+				assert.Equal(t, input, named.Name(), "episode should not have been trimmed")
+				return
+			}
 			require.NotEqual(t, input, named.Name(), "episode should have been trimmed")
 
 			duration := resultDurationOrZero(ctx, named.Name(), log.New())

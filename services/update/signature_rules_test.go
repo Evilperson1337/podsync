@@ -2,7 +2,10 @@ package update
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/mxpv/podsync/pkg/feed"
 )
 
 // TestReadSignatureRules verifies rules.json parsing.
@@ -49,5 +52,49 @@ func TestResolveSignaturesRoot(t *testing.T) {
 	}
 	if got := ResolveSignaturesRoot(" /configured ", "/data"); got != "/configured" {
 		t.Fatalf("expected configured root to win, got %q", got)
+	}
+}
+
+func TestSignatureFilePath(t *testing.T) {
+	if got := SignatureFilePath("/data", "show", "intro.wav"); got != filepath.Join("/data", "show", "signatures", "intro.wav") {
+		t.Fatalf("unexpected relative resolution: %q", got)
+	}
+	if got := SignatureFilePath("", "show", "/sigs/intro.wav"); got != "/sigs/intro.wav" {
+		t.Fatalf("absolute file should be used as-is, got %q", got)
+	}
+	if got := SignatureFilePath("", "show", "intro.wav"); got != "" {
+		t.Fatalf("relative file without root should not resolve, got %q", got)
+	}
+}
+
+func TestLoadFeedSignatureRulesPrecedence(t *testing.T) {
+	root := t.TempDir()
+	sigDir := SignaturesDir(root, "show")
+	if err := os.MkdirAll(sigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sigDir, "rules.json"), []byte(`{"rules":[{"file":"json.wav","action":"cut_after"}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	withTOML := &feed.Config{ID: "show", SignatureRules: []feed.SignatureRule{{File: "toml.wav", Action: "cut_before"}}}
+	rules, source, ignored, err := LoadFeedSignatureRules(root, withTOML)
+	if err != nil || source != SignatureRulesSourceConfig || !ignored || len(rules) != 1 || rules[0].File != "toml.wav" {
+		t.Fatalf("TOML rules should win: rules=%v source=%q ignored=%v err=%v", rules, source, ignored, err)
+	}
+
+	rules, source, ignored, err = LoadFeedSignatureRules(root, &feed.Config{ID: "show"})
+	if err != nil || source != SignatureRulesSourceRulesJSON || ignored || len(rules) != 1 || rules[0].File != "json.wav" {
+		t.Fatalf("rules.json should be the fallback: rules=%v source=%q ignored=%v err=%v", rules, source, ignored, err)
+	}
+
+	rules, source, _, err = LoadFeedSignatureRules(root, &feed.Config{ID: "other"})
+	if err != nil || source != "" || len(rules) != 0 {
+		t.Fatalf("no rules expected: rules=%v source=%q err=%v", rules, source, err)
+	}
+
+	rules, source, _, err = LoadFeedSignatureRules("", withTOML)
+	if err != nil || source != SignatureRulesSourceConfig || len(rules) != 1 {
+		t.Fatalf("TOML rules should load without a root: rules=%v source=%q err=%v", rules, source, err)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/mxpv/podsync/pkg/fs"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/pkg/ytdl"
+	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
 )
 
@@ -172,6 +173,10 @@ func (c *Config) validate() error {
 		if err := validateFeedAudiobookshelf(id, f.Audiobookshelf, c.Audiobookshelf.Enabled); err != nil {
 			result = multierror.Append(result, err)
 		}
+
+		if err := c.validateSignatureRules(id, f); err != nil {
+			result = multierror.Append(result, err)
+		}
 	}
 
 	if err := c.validateAudiobookshelf(); err != nil {
@@ -179,6 +184,81 @@ func (c *Config) validate() error {
 	}
 
 	return result.ErrorOrNil()
+}
+
+// signaturesRoot resolves the signatures root the updater will use.
+func (c *Config) signaturesRoot() string {
+	localDataDir := ""
+	if c.Storage.Type == "local" {
+		localDataDir = c.Storage.Local.DataDir
+	}
+	return update.ResolveSignaturesRoot(c.Signatures.RootDir, localDataDir)
+}
+
+// validateSignatureRules fails on invalid signature_rules configured in TOML, including missing
+// signature files. A legacy rules.json is checked too, but its problems are only logged so that
+// existing deployments keep starting.
+func (c *Config) validateSignatureRules(feedID string, f *feed.Config) error {
+	root := c.signaturesRoot()
+	rulesPath := ""
+	if root != "" {
+		rulesPath = update.SignatureRulesPath(root, feedID)
+	}
+
+	if len(f.SignatureRules) == 0 {
+		if rulesPath != "" {
+			warnRulesJSON(feedID, root, rulesPath)
+		}
+		return nil
+	}
+
+	if rulesPath != "" {
+		if _, err := os.Stat(rulesPath); err == nil {
+			log.Warnf("signature_rules are configured for %q, so %s is ignored", feedID, rulesPath)
+		}
+	}
+	var result *multierror.Error
+	for idx, rule := range f.SignatureRules {
+		if err := checkSignatureRule(root, feedID, rule); err != nil {
+			result = multierror.Append(result, errors.Wrapf(err, "signature_rules[%d] for %q", idx, feedID))
+		}
+	}
+	return result.ErrorOrNil()
+}
+
+func warnRulesJSON(feedID, root, rulesPath string) {
+	parsed, ok, err := update.ReadSignatureRules(rulesPath)
+	if err != nil {
+		log.WithError(err).Warnf("signature rules for %q in %s cannot be read; signature trimming will fail for this feed", feedID, rulesPath)
+		return
+	}
+	if !ok {
+		return
+	}
+	for idx, rule := range parsed.Rules {
+		if err := checkSignatureRule(root, feedID, rule); err != nil {
+			log.WithError(err).Warnf("rule %d in %s for %q will be skipped", idx, rulesPath, feedID)
+		}
+	}
+}
+
+// checkSignatureRule validates a rule's fields and that its signature file exists and is not empty.
+func checkSignatureRule(root, feedID string, rule feed.SignatureRule) error {
+	if err := rule.Validate(); err != nil {
+		return err
+	}
+	path := update.SignatureFilePath(root, feedID, rule.File)
+	if path == "" {
+		return errors.Errorf("relative file %q needs [signatures] root_dir (or an absolute path) when not using local storage", rule.File)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return errors.Wrapf(err, "signature file %q is not accessible", path)
+	}
+	if info.IsDir() || info.Size() == 0 {
+		return errors.Errorf("signature file %q is empty or not a file", path)
+	}
+	return nil
 }
 
 func (c *Config) validateAudiobookshelf() error {

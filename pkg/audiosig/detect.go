@@ -72,6 +72,22 @@ func (a *InputAnalysis) Duration() time.Duration {
 	return a.duration
 }
 
+// WithThresholds returns a view of the analysis that uses different match thresholds, sharing
+// the decoded envelope. Zero values keep the current thresholds.
+// Example usage:
+//
+//	strict := analysis.WithThresholds(0.8, 1.5)
+func (a *InputAnalysis) WithThresholds(minScore float64, minPeakRatio float64) *InputAnalysis {
+	view := *a
+	if minScore > 0 {
+		view.cfg.MinScore = minScore
+	}
+	if minPeakRatio > 0 {
+		view.cfg.MinPeakRatio = minPeakRatio
+	}
+	return &view
+}
+
 // Detect finds the single strongest occurrence of the signature.
 // Notes: Only the best coarse candidate is refined; MatchFound is false when it does not pass
 // the configured thresholds.

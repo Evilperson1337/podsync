@@ -671,3 +671,132 @@ func setup(t *testing.T, file string) string {
 
 	return f.Name()
 }
+
+func TestLoadConfig_SignatureRules(t *testing.T) {
+	t.Setenv("PODSYNC_SIGNATURES_DIR", "")
+
+	// newDataDir creates a local data dir holding feed "show"'s signature file.
+	newDataDir := func(t *testing.T) string {
+		dataDir := t.TempDir()
+		sigDir := filepath.Join(dataDir, "show", "signatures")
+		require.NoError(t, os.MkdirAll(sigDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(sigDir, "intro.wav"), []byte("RIFF"), 0644))
+		return dataDir
+	}
+	configFor := func(dataDir string, rules string) string {
+		return `
+[storage]
+type = "local"
+  [storage.local]
+  data_dir = "` + filepath.ToSlash(dataDir) + `"
+
+[feeds]
+  [feeds.show]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+` + rules
+	}
+
+	t.Run("valid rules parse", func(t *testing.T) {
+		path := setup(t, configFor(newDataDir(t), `
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "cut_before"
+  post = 1.5
+
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "remove_segment"
+  max_matches = 10
+  min_score = 0.75
+  min_peak_ratio = 1.4
+`))
+		defer os.Remove(path)
+
+		config, err := LoadConfig(path)
+		require.NoError(t, err)
+		rules := config.Feeds["show"].SignatureRules
+		require.Len(t, rules, 2)
+		assert.Equal(t, "cut_before", rules[0].Action)
+		assert.Equal(t, 1.5, rules[0].PostSeconds)
+		assert.Equal(t, 10, rules[1].MaxMatches)
+		assert.Equal(t, 0.75, rules[1].MinScore)
+		assert.Equal(t, 1.4, rules[1].MinPeakRatio)
+	})
+
+	t.Run("invalid action fails", func(t *testing.T) {
+		path := setup(t, configFor(newDataDir(t), `
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "cut_befor"
+`))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `signature_rules[0] for "show"`)
+		assert.Contains(t, err.Error(), `"cut_befor"`)
+	})
+
+	t.Run("missing signature file fails", func(t *testing.T) {
+		path := setup(t, configFor(newDataDir(t), `
+  [[feeds.show.signature_rules]]
+  file = "intro.wv"
+  action = "cut_before"
+`))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "intro.wv")
+	})
+
+	t.Run("relative file with s3 and no root fails", func(t *testing.T) {
+		path := setup(t, `
+[server]
+hostname = "https://podsync.example.com"
+
+[storage]
+type = "s3"
+  [storage.s3]
+  endpoint_url = "https://s3.example.com"
+  region = "us-east-1"
+  bucket = "podsync"
+
+[feeds]
+  [feeds.show]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "cut_before"
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "root_dir")
+	})
+
+	t.Run("absolute file resolves without data dir layout", func(t *testing.T) {
+		sig := filepath.Join(t.TempDir(), "sig.wav")
+		require.NoError(t, os.WriteFile(sig, []byte("RIFF"), 0644))
+		path := setup(t, configFor(t.TempDir(), `
+  [[feeds.show.signature_rules]]
+  file = "`+filepath.ToSlash(sig)+`"
+  action = "cut_after"
+`))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.NoError(t, err)
+	})
+
+	t.Run("broken rules.json only warns", func(t *testing.T) {
+		dataDir := newDataDir(t)
+		require.NoError(t, os.WriteFile(filepath.Join(dataDir, "show", "signatures", "rules.json"), []byte(`{"rules":[{"file":"nope.wav","action":"bad"}]}`), 0644))
+		path := setup(t, configFor(dataDir, ""))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.NoError(t, err)
+	})
+}

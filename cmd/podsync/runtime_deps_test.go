@@ -47,6 +47,12 @@ func TestRequiresSignatureTooling(t *testing.T) {
 		assert.True(t, requiresSignatureTooling(cfg))
 	})
 
+	t.Run("signature rules in config", func(t *testing.T) {
+		cfg := newConfig(t.TempDir())
+		cfg.Feeds["doctrine"].SignatureRules = []feed.SignatureRule{{File: "/sigs/intro.wav", Action: feed.SignatureActionCutBefore}}
+		assert.True(t, requiresSignatureTooling(cfg))
+	})
+
 	t.Run("s3 storage without explicit root", func(t *testing.T) {
 		cfg := newConfig("")
 		cfg.Storage.Type = "s3"

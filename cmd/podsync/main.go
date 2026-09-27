@@ -359,16 +359,12 @@ func requiresSignatureTooling(cfg *Config) bool {
 	if strings.TrimSpace(cfg.Signatures.RootDir) != "" || strings.TrimSpace(os.Getenv("PODSYNC_SIGNATURES_DIR")) != "" {
 		return true
 	}
-	localDataDir := ""
-	if cfg.Storage.Type == "local" {
-		localDataDir = cfg.Storage.Local.DataDir
-	}
-	sigRoot := update.ResolveSignaturesRoot(cfg.Signatures.RootDir, localDataDir)
+	sigRoot := cfg.signaturesRoot()
 	for id, feedCfg := range cfg.Feeds {
 		if feedCfg == nil {
 			continue
 		}
-		if feedCfg.Custom.SponsorBlockConfig().Enabled {
+		if feedCfg.Custom.SponsorBlockConfig().Enabled || len(feedCfg.SignatureRules) > 0 {
 			return true
 		}
 		// Signature trimming is active for any feed with a rules.json, including under the
