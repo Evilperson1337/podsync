@@ -49,12 +49,30 @@ Enable SponsorBlock trimming per feed under [`custom`](../pkg/feed/config.go).
 Minimal example:
 
 ```toml
-[feeds.crowder.feed_custom.sponsorblock]
-sponsorBlockEnabled = true
-sponsorBlockCategories = ["sponsor"]
+[feeds.crowder.custom.sponsorblock]
+enabled = true
+categories = ["sponsor"]
 ```
 
 Multiple categories:
+
+```toml
+[feeds.crowder.custom.sponsorblock]
+enabled = true
+categories = ["sponsor", "intro", "outro"]
+```
+
+Disabled configuration:
+
+```toml
+[feeds.crowder.custom.sponsorblock]
+enabled = false
+categories = ["sponsor", "intro"]
+```
+
+When `enabled = false`, SponsorBlock is ignored for that feed even if categories are present.
+
+The older flat keys are still supported directly under `[feeds.<id>.custom]`:
 
 ```toml
 [feeds.crowder.custom]
@@ -62,15 +80,7 @@ sponsorBlockEnabled = true
 sponsorBlockCategories = ["sponsor", "intro", "outro"]
 ```
 
-Disabled configuration:
-
-```toml
-[feeds.crowder.custom]
-sponsorBlockEnabled = false
-sponsorBlockCategories = ["sponsor", "intro"]
-```
-
-When `enabled = false`, SponsorBlock is ignored for that feed even if categories are present.
+Do not mix the two forms inside a `sponsorblock` table: keys such as `sponsorBlockEnabled` under `[feeds.<id>.custom.sponsorblock]` are not valid, and Podsync rejects them at startup as unknown keys. (Earlier versions of this page showed that form, and it silently left SponsorBlock disabled.)
 
 ## Enable SponsorBlock Trimming for a Feed
 

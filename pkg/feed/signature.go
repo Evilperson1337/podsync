@@ -3,6 +3,7 @@ package feed
 import (
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -32,16 +33,38 @@ type SignatureRule struct {
 	// Action is one of cut_before, cut_after, remove_segment.
 	Action string `toml:"action" json:"action"`
 	// PreSeconds is padding before signature_start.
-	PreSeconds float64 `toml:"pre" json:"pre"`
+	PreSeconds Number `toml:"pre" json:"pre"`
 	// PostSeconds is padding after signature_end.
-	PostSeconds float64 `toml:"post" json:"post"`
+	PostSeconds Number `toml:"post" json:"post"`
 	// MaxMatches is how many occurrences of the signature to act on. Values below 2 use only the
 	// strongest match; higher values find repeated occurrences (e.g. a stinger before every ad break).
 	MaxMatches int `toml:"max_matches" json:"max_matches,omitempty"`
 	// MinScore overrides the minimum confidence score (0-1) for this rule; 0 keeps the default.
-	MinScore float64 `toml:"min_score" json:"min_score,omitempty"`
+	MinScore Number `toml:"min_score" json:"min_score,omitempty"`
 	// MinPeakRatio overrides the minimum best/runner-up peak ratio for this rule; 0 keeps the default.
-	MinPeakRatio float64 `toml:"min_peak_ratio" json:"min_peak_ratio,omitempty"`
+	MinPeakRatio Number `toml:"min_peak_ratio" json:"min_peak_ratio,omitempty"`
+}
+
+// Number is a float64 configuration value that also accepts TOML integers, so both
+// post = 60 and post = 60.5 work. The TOML decoder does not convert integers to floats itself.
+type Number float64
+
+// UnmarshalTOML implements toml.Unmarshaler.
+func (n *Number) UnmarshalTOML(value interface{}) error {
+	switch v := value.(type) {
+	case int64:
+		*n = Number(v)
+	case float64:
+		*n = Number(v)
+	default:
+		return errors.Errorf("expected a number, got %v (%T)", value, value)
+	}
+	return nil
+}
+
+// Seconds converts a number of seconds to a time.Duration.
+func (n Number) Seconds() time.Duration {
+	return time.Duration(float64(n) * float64(time.Second))
 }
 
 // MaxMatchCount returns how many occurrences to act on, defaulting to 1.

@@ -262,7 +262,7 @@ Notes:
 
 - `update_period = "30m"` is useful for testing because it is easy to reason about.
 - If you use `cron_schedule`, Podsync expects standard cron syntax as documented in [`docs/cron.md`](docs/cron.md).
-- The sample file in [`bin/config.toml`](bin/config.toml) is a fuller example, but many of its feeds use explicit cron schedules, which can make startup look idle if you expect immediate downloads.
+- [`config.toml.example`](config.toml.example) shows every available option. Its example feed uses an explicit `cron_schedule`, which can make startup look idle if you expect immediate downloads.
 
 ### 2. Run with Docker
 

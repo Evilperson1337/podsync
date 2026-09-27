@@ -234,7 +234,7 @@ func (u *Manager) collectSignatureMatches(ctx context.Context, feedConfig *feed.
 				return nil, 0, fmt.Errorf("signature analysis failed: %w", err)
 			}
 		}
-		ruleAnalysis := analysis.WithThresholds(rule.MinScore, rule.MinPeakRatio)
+		ruleAnalysis := analysis.WithThresholds(float64(rule.MinScore), float64(rule.MinPeakRatio))
 		results, err := detectRule(ctx, ruleAnalysis, sigPath, maxMatches)
 		if err != nil {
 			return nil, 0, fmt.Errorf("signature detect failed: %w", err)

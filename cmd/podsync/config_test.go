@@ -701,14 +701,16 @@ type = "local"
   [[feeds.show.signature_rules]]
   file = "intro.wav"
   action = "cut_before"
+  pre = 0
   post = 1.5
 
   [[feeds.show.signature_rules]]
   file = "intro.wav"
   action = "remove_segment"
+  post = 60
   max_matches = 10
   min_score = 0.75
-  min_peak_ratio = 1.4
+  min_peak_ratio = 2
 `))
 		defer os.Remove(path)
 
@@ -717,10 +719,11 @@ type = "local"
 		rules := config.Feeds["show"].SignatureRules
 		require.Len(t, rules, 2)
 		assert.Equal(t, "cut_before", rules[0].Action)
-		assert.Equal(t, 1.5, rules[0].PostSeconds)
+		assert.EqualValues(t, 1.5, rules[0].PostSeconds)
 		assert.Equal(t, 10, rules[1].MaxMatches)
-		assert.Equal(t, 0.75, rules[1].MinScore)
-		assert.Equal(t, 1.4, rules[1].MinPeakRatio)
+		assert.EqualValues(t, 60, rules[1].PostSeconds, "integer values are accepted for decimal fields")
+		assert.EqualValues(t, 0.75, rules[1].MinScore)
+		assert.EqualValues(t, 2, rules[1].MinPeakRatio)
 	})
 
 	t.Run("invalid action fails", func(t *testing.T) {

@@ -106,8 +106,8 @@ func buildTrimPlan(inputDur time.Duration, matches []matchedRule, logger log.Fie
 func buildTrimOperation(inputDur time.Duration, match matchedRule, logger log.FieldLogger) (trimOperation, bool) {
 	rule := match.rule
 	result := match.result
-	start := result.SignatureStart - time.Duration(rule.PreSeconds*float64(time.Second))
-	end := result.SignatureEnd + time.Duration(rule.PostSeconds*float64(time.Second))
+	start := result.SignatureStart - rule.PreSeconds.Seconds()
+	end := result.SignatureEnd + rule.PostSeconds.Seconds()
 	if start < 0 {
 		start = 0
 	}
