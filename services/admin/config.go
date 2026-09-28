@@ -34,23 +34,23 @@ const (
 //	trusted_proxies = ["172.18.0.0/16"]
 type Config struct {
 	// Enabled starts the admin interface. Disabled by default.
-	Enabled bool `toml:"enabled"`
+	Enabled bool `toml:"enabled" doc:"Start the admin interface."`
 	// BindAddress is the address to listen on. Empty or "*" listens on all addresses.
-	BindAddress string `toml:"bind_address"`
+	BindAddress string `toml:"bind_address" doc:"Address to listen on. Empty or \"*\" listens on all addresses."`
 	// Port is the admin listener port (default 8081). It must differ from the podcast server port.
-	Port int `toml:"port"`
+	Port int `toml:"port" doc:"Admin port (default 8081). Must differ from server.port. Do not publish it directly."`
 	// Auth is the authentication mode: "proxy" or "password".
-	Auth string `toml:"auth" enum:"proxy,password"`
+	Auth string `toml:"auth" enum:"proxy,password" doc:"\"proxy\" trusts a user header from an authenticating reverse proxy; \"password\" uses HTTP Basic authentication."`
 	// TrustedProxies lists IP addresses or CIDR ranges of the reverse proxy (proxy mode).
 	// Requests from any other address are rejected.
-	TrustedProxies []string `toml:"trusted_proxies"`
+	TrustedProxies []string `toml:"trusted_proxies" doc:"Reverse proxy IP addresses or CIDR ranges (proxy mode). Keep this as narrow as possible."`
 	// UserHeader is the header carrying the authenticated user name (proxy mode, default "Remote-User").
-	UserHeader string `toml:"user_header"`
+	UserHeader string `toml:"user_header" doc:"Header carrying the signed-in user from the proxy (default \"Remote-User\")."`
 	// Username is the login name (password mode, default "admin").
-	Username string `toml:"username"`
+	Username string `toml:"username" doc:"Login name for password mode (default \"admin\")."`
 	// PasswordHash is a bcrypt hash of the admin password (password mode). Generate one with
 	// podsync --hash-password.
-	PasswordHash string `toml:"password_hash" secret:"true"`
+	PasswordHash string `toml:"password_hash" secret:"true" doc:"bcrypt hash of the admin password, from podsync --hash-password."`
 }
 
 // ApplyDefaults fills unset fields.

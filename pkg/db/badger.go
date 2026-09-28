@@ -26,8 +26,8 @@ const (
 
 // BadgerConfig represents BadgerDB configuration parameters
 type BadgerConfig struct {
-	Truncate bool `toml:"truncate"`
-	FileIO   bool `toml:"file_io"`
+	Truncate bool `toml:"truncate" doc:"Truncate a corrupted value log instead of failing to open the database."`
+	FileIO   bool `toml:"file_io" doc:"Use standard file I/O instead of memory mapping, to reduce memory use."`
 }
 
 type Badger struct {

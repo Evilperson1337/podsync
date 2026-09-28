@@ -13,7 +13,7 @@ import (
 
 // LocalConfig is the storage configuration for local file system
 type LocalConfig struct {
-	DataDir string `toml:"data_dir"`
+	DataDir string `toml:"data_dir" doc:"Directory for episodes and feed files. Defaults to a \"data\" directory next to the configuration file."`
 }
 
 // Local implements local file storage

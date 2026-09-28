@@ -33,7 +33,7 @@ type Storage interface {
 // Config is a configuration for the file storage backend
 type Config struct {
 	// Type is the type of file system to use
-	Type  string      `toml:"type" enum:"local,s3"`
-	Local LocalConfig `toml:"local"`
-	S3    S3Config    `toml:"s3"`
+	Type  string      `toml:"type" enum:"local,s3" doc:"Storage backend: \"local\" (default) or \"s3\"."`
+	Local LocalConfig `toml:"local" doc:"Local disk storage settings."`
+	S3    S3Config    `toml:"s3" doc:"S3-compatible storage settings. Credentials come from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."`
 }

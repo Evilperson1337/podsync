@@ -55,22 +55,22 @@ type Config struct {
 }
 
 type SignatureConfig struct {
-	RootDir string `toml:"root_dir"`
+	RootDir string `toml:"root_dir" doc:"Directory with per-feed signature folders (<root_dir>/<feed ID>/signatures). Defaults to the local data directory."`
 }
 
 type Log struct {
 	// Filename to write the log to (instead of stdout)
-	Filename string `toml:"filename"`
+	Filename string `toml:"filename" doc:"Write logs to this file instead of stdout."`
 	// MaxSize is the maximum size of the log file in MB
-	MaxSize int `toml:"max_size"`
+	MaxSize int `toml:"max_size" doc:"Maximum log file size in MB before rotation (default 50)."`
 	// MaxBackups is the maximum number of log file backups to keep after rotation
-	MaxBackups int `toml:"max_backups"`
+	MaxBackups int `toml:"max_backups" doc:"Number of rotated log files to keep (default 7)."`
 	// MaxAge is the maximum number of days to keep the logs for
-	MaxAge int `toml:"max_age"`
+	MaxAge int `toml:"max_age" doc:"Days to keep rotated log files (default 30)."`
 	// Compress old backups
-	Compress bool `toml:"compress"`
+	Compress bool `toml:"compress" doc:"Compress rotated log files."`
 	// Debug mode
-	Debug bool `toml:"debug"`
+	Debug bool `toml:"debug" doc:"Enable debug logging."`
 }
 
 // ErrConfigNotFound is returned by LoadConfig when the configuration file does not exist.

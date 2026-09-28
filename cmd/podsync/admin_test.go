@@ -165,3 +165,26 @@ func TestRestartOnlyChangesIncludesAdmin(t *testing.T) {
 	after.Admin.Enabled = true
 	assert.Equal(t, []string{"admin"}, restartOnlyChanges(&Config{}, after))
 }
+
+// TestConfigSchemaDescribesEveryOption keeps the admin editor's help text and generated file
+// comments complete: every option needs a doc tag.
+func TestConfigSchemaDescribesEveryOption(t *testing.T) {
+	schema := configschema.Generate(reflect.TypeOf(Config{}))
+	var missing []string
+	var walk func(s *configschema.Schema, path string)
+	walk = func(s *configschema.Schema, path string) {
+		if s == nil {
+			return
+		}
+		for name, property := range s.Properties {
+			if strings.TrimSpace(property.Description) == "" {
+				missing = append(missing, path+name)
+			}
+			walk(property, path+name+".")
+		}
+		walk(s.Items, path+"[].")
+		walk(s.AdditionalProperties, path+"<id>.")
+	}
+	walk(schema, "")
+	assert.Empty(t, missing, "options without a doc tag")
+}

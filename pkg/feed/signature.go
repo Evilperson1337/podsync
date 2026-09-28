@@ -31,20 +31,20 @@ func ValidSignatureActions() []string {
 // or, as a fallback, in <signatures_root>/<feed_id>/signatures/rules.json.
 type SignatureRule struct {
 	// File is the signature audio file, relative to <signatures_root>/<feed_id>/signatures/ or absolute.
-	File string `toml:"file" json:"file"`
+	File string `toml:"file" json:"file" doc:"Signature audio file, relative to <signatures root>/<feed ID>/signatures/ or absolute."`
 	// Action is one of cut_before, cut_after, remove_segment.
-	Action string `toml:"action" json:"action" enum:"cut_before,cut_after,remove_segment"`
+	Action string `toml:"action" json:"action" enum:"cut_before,cut_after,remove_segment" doc:"\"cut_before\" removes everything before the signature end, \"cut_after\" everything after its start, \"remove_segment\" the signature itself."`
 	// PreSeconds is padding before signature_start.
-	PreSeconds Number `toml:"pre" json:"pre"`
+	PreSeconds Number `toml:"pre" json:"pre" doc:"Seconds of padding before the signature start."`
 	// PostSeconds is padding after signature_end.
-	PostSeconds Number `toml:"post" json:"post"`
+	PostSeconds Number `toml:"post" json:"post" doc:"Seconds of padding after the signature end."`
 	// MaxMatches is how many occurrences of the signature to act on. Values below 2 use only the
 	// strongest match; higher values find repeated occurrences (e.g. a stinger before every ad break).
-	MaxMatches int `toml:"max_matches" json:"max_matches,omitempty"`
+	MaxMatches int `toml:"max_matches" json:"max_matches,omitempty" doc:"Number of occurrences to act on (default 1). Raise it for signatures that repeat, such as ad break stingers."`
 	// MinScore overrides the minimum confidence score (0-1) for this rule; 0 keeps the default.
-	MinScore Number `toml:"min_score" json:"min_score,omitempty"`
+	MinScore Number `toml:"min_score" json:"min_score,omitempty" doc:"Minimum confidence score, 0-1 (default 0.6)."`
 	// MinPeakRatio overrides the minimum best/runner-up peak ratio for this rule; 0 keeps the default.
-	MinPeakRatio Number `toml:"min_peak_ratio" json:"min_peak_ratio,omitempty"`
+	MinPeakRatio Number `toml:"min_peak_ratio" json:"min_peak_ratio,omitempty" doc:"How much the best match must stand out from nearby matches (default 1.2)."`
 }
 
 // Number is a float64 configuration value that also accepts TOML integers, so both

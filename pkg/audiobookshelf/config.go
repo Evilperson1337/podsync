@@ -14,9 +14,9 @@ import (
 //	podcast_root = "/data/media/podcasts"
 type Config struct {
 	// Enabled turns on hardlink export globally. Feeds must also opt in.
-	Enabled bool `toml:"enabled"`
+	Enabled bool `toml:"enabled" doc:"Enable Audiobookshelf export. Feeds must also enable it."`
 	// PodcastRoot is the Audiobookshelf podcast library root directory.
-	PodcastRoot string `toml:"podcast_root"`
+	PodcastRoot string `toml:"podcast_root" doc:"Audiobookshelf podcast library directory. Must be on the same filesystem as the Podsync data directory."`
 }
 
 // FeedConfig is the per-feed Audiobookshelf export configuration.
@@ -26,9 +26,9 @@ type Config struct {
 //	directory = "Doctrine"
 type FeedConfig struct {
 	// Enabled turns on hardlink export for this feed.
-	Enabled bool `toml:"enabled"`
+	Enabled bool `toml:"enabled" doc:"Export this feed to Audiobookshelf."`
 	// Directory is the podcast directory relative to PodcastRoot.
-	Directory string `toml:"directory"`
+	Directory string `toml:"directory" doc:"Podcast directory, relative to audiobookshelf.podcast_root."`
 }
 
 // ValidateDirectory checks that a per-feed directory is a non-empty relative

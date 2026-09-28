@@ -27,28 +27,28 @@ func (s *Server) SetFeedCount(count func() int) {
 
 type Config struct {
 	// Hostname to use for download links
-	Hostname string `toml:"hostname"`
+	Hostname string `toml:"hostname" doc:"Public base URL used in feed and episode links, e.g. \"https://podcasts.example.com\". Defaults to http://localhost:<port>."`
 	// Port is a server port to listen to
-	Port int `toml:"port"`
+	Port int `toml:"port" doc:"Port of the podcast web server (default 8080)."`
 	// Bind a specific IP addresses for server
 	// "*": bind all IP addresses which is default option
 	// localhost or 127.0.0.1  bind a single IPv4 address
-	BindAddress string `toml:"bind_address"`
+	BindAddress string `toml:"bind_address" doc:"Address to listen on. Empty or \"*\" listens on all addresses."`
 	// Flag indicating if the server will use TLS
-	TLS bool `toml:"tls"`
+	TLS bool `toml:"tls" doc:"Serve HTTPS directly. Requires certificate_path and key_file_path; not needed behind a TLS reverse proxy."`
 	// Path to a certificate file for TLS connections
-	CertificatePath string `toml:"certificate_path"`
+	CertificatePath string `toml:"certificate_path" doc:"TLS certificate file, used when tls is enabled."`
 	// Path to a private key file for TLS connections
-	KeyFilePath string `toml:"key_file_path"`
+	KeyFilePath string `toml:"key_file_path" doc:"TLS private key file, used when tls is enabled."`
 	// Specify path for reverse proxy and only [A-Za-z0-9]
-	Path string `toml:"path"`
+	Path string `toml:"path" doc:"Optional URL path prefix for feeds and episodes (letters and digits only), for reverse proxies that route by path."`
 	// DataDir is a path to a directory to keep XML feeds and downloaded episodes,
 	// that will be available to user via web server for download.
-	DataDir string `toml:"data_dir"`
+	DataDir string `toml:"data_dir" doc:"Deprecated: use storage.local.data_dir."`
 	// WebUIEnabled is a flag indicating if web UI is enabled
-	WebUIEnabled bool `toml:"web_ui"`
+	WebUIEnabled bool `toml:"web_ui" doc:"Serve the simple public feed list at /index.html (feeds must have opml enabled)."`
 	// DebugEndpoints enables /debug/vars endpoint for runtime metrics (disabled by default)
-	DebugEndpoints bool `toml:"debug_endpoints"`
+	DebugEndpoints bool `toml:"debug_endpoints" doc:"Expose runtime metrics at /debug/vars. Only enable when the server is not publicly reachable."`
 }
 
 func New(cfg Config, storage http.FileSystem, database db.Storage) *Server {
