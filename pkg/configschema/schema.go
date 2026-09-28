@@ -105,6 +105,32 @@ func generate(typ reflect.Type) *Schema {
 	}
 }
 
+// Child returns the schema of key inside an object schema: a declared property (matched
+// case-insensitively, like the decoder) or the schema of map entries. It returns nil when the key
+// is not described or s is nil.
+func (s *Schema) Child(key string) *Schema {
+	if s == nil {
+		return nil
+	}
+	if property, ok := s.Properties[key]; ok {
+		return property
+	}
+	for name, property := range s.Properties {
+		if strings.EqualFold(name, key) {
+			return property
+		}
+	}
+	return s.AdditionalProperties
+}
+
+// Item returns the schema of list items, or nil.
+func (s *Schema) Item() *Schema {
+	if s == nil {
+		return nil
+	}
+	return s.Items
+}
+
 // markSecret flags a value and everything inside it as write-only.
 func markSecret(schema *Schema) {
 	if schema == nil {

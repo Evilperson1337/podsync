@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"reflect"
@@ -197,6 +199,32 @@ type configReloader struct {
 
 	mu      sync.Mutex
 	current *Config
+	// startup is the configuration Podsync started with. Restart-only sections are compared
+	// against it, so a pending restart stays visible across later reloads.
+	startup *Config
+	// appliedHash identifies the file content currently applied; unchanged content is not
+	// reloaded again (for example when the file watcher sees an admin save).
+	appliedHash string
+}
+
+// configContentHash identifies a version of the configuration file.
+func configContentHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// PendingRestart lists sections whose applied changes only take effect after a restart.
+func (r *configReloader) PendingRestart() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return restartOnlyChanges(r.startupConfig(), r.current)
+}
+
+func (r *configReloader) startupConfig() *Config {
+	if r.startup == nil {
+		r.startup = r.current
+	}
+	return r.startup
 }
 
 // Current returns the running configuration.
@@ -213,30 +241,42 @@ func (r *configReloader) FeedCount() int {
 	return len(r.current.Feeds)
 }
 
-// Reload loads the configuration file and applies it.
-func (r *configReloader) Reload(reason string) error {
+// Reload loads the configuration file and applies it. It returns the feed changes; content that
+// is already applied is skipped.
+func (r *configReloader) Reload(reason string) (feedChanges, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	logger := log.WithFields(log.Fields{"config": r.path, "reason": reason})
-	cfg, err := LoadConfig(r.path)
-	if err != nil {
+	fail := func(err error) (feedChanges, error) {
 		logger.WithError(err).Error("configuration reload failed; keeping the running configuration")
-		return err
+		return feedChanges{}, err
+	}
+
+	data, err := os.ReadFile(r.path)
+	if err != nil {
+		return fail(err)
+	}
+	hash := configContentHash(data)
+	if r.appliedHash != "" && hash == r.appliedHash {
+		logger.Debug("configuration unchanged; nothing to reload")
+		return feedChanges{}, nil
+	}
+	cfg, err := loadConfigData(r.path, data)
+	if err != nil {
+		return fail(err)
 	}
 	if r.validate != nil {
 		if err := r.validate(cfg); err != nil {
-			logger.WithError(err).Error("configuration reload failed; keeping the running configuration")
-			return err
+			return fail(err)
 		}
 	}
 	keys, err := newKeyProviders(cfg.Tokens)
 	if err != nil {
-		logger.WithError(err).Error("configuration reload failed; keeping the running configuration")
-		return err
+		return fail(err)
 	}
 
-	for _, section := range restartOnlyChanges(r.current, cfg) {
+	for _, section := range restartOnlyChanges(r.startupConfig(), cfg) {
 		logger.Warnf("changes to [%s] take effect after Podsync is restarted", section)
 	}
 
@@ -244,6 +284,7 @@ func (r *configReloader) Reload(reason string) error {
 	r.updater.SetFeeds(cfg.Feeds)
 	changes, scheduleErr := r.schedule.Apply(cfg.Feeds)
 	r.current = cfg
+	r.appliedHash = hash
 
 	logger.WithFields(log.Fields{
 		"feeds":   len(cfg.Feeds),
@@ -260,7 +301,7 @@ func (r *configReloader) Reload(reason string) error {
 	if scheduleErr != nil {
 		logger.WithError(scheduleErr).Error("some feeds could not be scheduled")
 	}
-	return scheduleErr
+	return changes, scheduleErr
 }
 
 // restartOnlyChanges lists configuration sections that differ between two configurations but are

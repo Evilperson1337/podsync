@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/mxpv/podsync/pkg/audiobookshelf"
+	"github.com/mxpv/podsync/pkg/configschema"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
@@ -39,7 +40,7 @@ func newTestServer(t *testing.T, cfg Config, runtime Runtime) (*Server, db.Stora
 	if runtime == nil {
 		runtime = fakeRuntime{}
 	}
-	srv, err := New(Options{Config: cfg, Runtime: runtime, DB: database, Version: "test", ConfigPath: "/app/config.toml", Schema: map[string]string{"type": "object"}})
+	srv, err := New(Options{Config: cfg, Runtime: runtime, DB: database, Version: "test", ConfigPath: "/app/config.toml", Schema: &configschema.Schema{Type: "object"}})
 	require.NoError(t, err)
 	return srv, database
 }

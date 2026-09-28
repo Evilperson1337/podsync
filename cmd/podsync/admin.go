@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
-	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 
 	"github.com/mxpv/podsync/services/admin"
@@ -72,16 +71,6 @@ func runHashPassword(stdin *os.File, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// minAdminPasswordLength guards against trivially guessable admin passwords.
-const minAdminPasswordLength = 12
-
 func hashAdminPassword(password string) (string, error) {
-	if len(password) < minAdminPasswordLength {
-		return "", errors.Errorf("the admin password must be at least %d characters", minAdminPasswordLength)
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to hash password")
-	}
-	return string(hash), nil
+	return admin.HashPassword(password)
 }

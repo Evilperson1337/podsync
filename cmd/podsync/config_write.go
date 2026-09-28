@@ -129,24 +129,12 @@ func orderedKeys(values map[string]interface{}, schema *configschema.Schema) []s
 	return append(keys, rest...)
 }
 
-// childSchema returns the schema of key inside schema, if known.
 func childSchema(schema *configschema.Schema, key string) *configschema.Schema {
-	if schema == nil {
-		return nil
-	}
-	for name, property := range schema.Properties {
-		if strings.EqualFold(name, key) {
-			return property
-		}
-	}
-	return schema.AdditionalProperties
+	return schema.Child(key)
 }
 
 func itemSchema(schema *configschema.Schema) *configschema.Schema {
-	if schema == nil {
-		return nil
-	}
-	return schema.Items
+	return schema.Item()
 }
 
 // describedKey reports whether a key's description should be written: struct options have one,

@@ -86,7 +86,13 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		return nil, errors.Wrapf(err, "failed to read config file: %s", path)
 	}
+	return loadConfigData(path, data)
+}
 
+// loadConfigData loads configuration content as if it were the file at path: path picks the
+// format and anchors path-relative defaults. It lets candidate configurations be validated
+// without writing them.
+func loadConfigData(path string, data []byte) (*Config, error) {
 	format := configFormatFor(path)
 	tree, err := parseConfigTree(format, data)
 	if err != nil {
@@ -537,14 +543,17 @@ func validateHooks(feedID string, hooks []*feed.ExecHook, field string) error {
 	return nil
 }
 
+// legacyAPIKeyEnv maps providers to the environment variables that replace their API tokens.
+var legacyAPIKeyEnv = map[model.Provider]string{
+	model.ProviderYoutube:    "PODSYNC_YOUTUBE_API_KEY",
+	model.ProviderVimeo:      "PODSYNC_VIMEO_API_KEY",
+	model.ProviderSoundcloud: "PODSYNC_SOUNDCLOUD_API_KEY",
+	model.ProviderTwitch:     "PODSYNC_TWITCH_API_KEY",
+	model.ProviderRumble:     "PODSYNC_RUMBLE_API_KEY",
+}
+
 func (c *Config) applyEnv() {
-	envVars := map[model.Provider]string{
-		model.ProviderYoutube:    "PODSYNC_YOUTUBE_API_KEY",
-		model.ProviderVimeo:      "PODSYNC_VIMEO_API_KEY",
-		model.ProviderSoundcloud: "PODSYNC_SOUNDCLOUD_API_KEY",
-		model.ProviderTwitch:     "PODSYNC_TWITCH_API_KEY",
-		model.ProviderRumble:     "PODSYNC_RUMBLE_API_KEY",
-	}
+	envVars := legacyAPIKeyEnv
 
 	// Replace API keys from config with environment variables
 	for provider, envVar := range envVars {

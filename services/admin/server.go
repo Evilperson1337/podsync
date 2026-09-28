@@ -13,6 +13,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/mxpv/podsync/pkg/configschema"
 	"github.com/mxpv/podsync/pkg/db"
 )
 
@@ -26,8 +27,11 @@ type Options struct {
 	DB         db.Storage
 	Version    string
 	ConfigPath string
-	// Schema is the JSON Schema of the configuration, served at /api/schema.
-	Schema interface{}
+	// Schema is the JSON Schema of the configuration, served at /api/schema and used to mask
+	// secrets.
+	Schema *configschema.Schema
+	// Store enables the configuration editor; without it the interface is read-only.
+	Store ConfigStore
 }
 
 // Server is the admin HTTP server.
@@ -52,6 +56,9 @@ func New(opts Options) (*Server, error) {
 	mux.HandleFunc("GET /api/me", srv.handleMe)
 	mux.HandleFunc("GET /api/status", srv.handleStatus)
 	mux.HandleFunc("GET /api/schema", srv.handleSchema)
+	if opts.Store != nil {
+		srv.registerConfigRoutes(mux)
+	}
 	mux.Handle("GET /", http.FileServerFS(static))
 
 	bind := opts.Config.BindAddress
@@ -67,10 +74,11 @@ type meResponse struct {
 	User     string `json:"user"`
 	AuthMode string `json:"auth_mode"`
 	Version  string `json:"version"`
+	Editable bool   `json:"editable"`
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, meResponse{User: UserFromContext(r.Context()), AuthMode: s.opts.Config.Auth, Version: s.opts.Version})
+	writeJSON(w, meResponse{User: UserFromContext(r.Context()), AuthMode: s.opts.Config.Auth, Version: s.opts.Version, Editable: s.opts.Store != nil})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

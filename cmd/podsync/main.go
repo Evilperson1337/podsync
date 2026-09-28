@@ -256,6 +256,7 @@ func main() {
 		updater:  manager,
 		schedule: schedule,
 		current:  cfg,
+		startup:  cfg,
 		validate: func(next *Config) error { return validateRuntimeDependencies(ctx, next) },
 		afterReload: func(feedChanges) {
 			opmlPublisher.Request(ctx)
@@ -271,7 +272,7 @@ func main() {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-hangup:
-				_ = reloader.Reload("SIGHUP")
+				_, _ = reloader.Reload("SIGHUP")
 			}
 		}
 	})
@@ -279,7 +280,7 @@ func main() {
 		log.WithField("config", absPath(opts.ConfigPath)).Info("watching configuration file for changes; feeds and tokens reload automatically")
 		group.Go(func() error {
 			watchConfigFile(ctx, opts.ConfigPath, configWatchInterval, func() {
-				_ = reloader.Reload("file changed")
+				_, _ = reloader.Reload("file changed")
 			})
 			return ctx.Err()
 		})
@@ -324,13 +325,16 @@ func main() {
 
 	// The admin interface has its own listener, so it runs with local and S3 storage alike.
 	if cfg.Admin.Enabled {
+		schema := configschema.Generate(reflect.TypeOf(Config{}))
+		validateRuntime := func(next *Config) error { return validateRuntimeDependencies(ctx, next) }
 		adminServer, err := admin.New(admin.Options{
 			Config:     cfg.Admin,
 			Runtime:    adminRuntime{reloader: reloader, schedule: schedule},
 			DB:         database,
 			Version:    version,
 			ConfigPath: absPath(opts.ConfigPath),
-			Schema:     configschema.Generate(reflect.TypeOf(Config{})),
+			Schema:     schema,
+			Store:      newFileConfigStore(opts.ConfigPath, schema, reloader, validateRuntime),
 		})
 		if err != nil {
 			log.WithError(err).Fatal("failed to create admin interface")
