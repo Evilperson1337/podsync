@@ -118,13 +118,26 @@ user_header = "X-Auth-Request-Preferred-Username"
 
 (`X-Auth-Request-User` also works if you prefer the Keycloak user ID over the user name.)
 
+## Dashboard
+
+The **Feeds** tab lists every configured feed with its schedule, next run, last success or failure (with the error), episode counts by state and Audiobookshelf link count. It refreshes every 30 seconds.
+
+**Update now** queues an immediate update of a feed, outside its schedule. If the feed is already queued or updating, nothing extra is queued and the button says so.
+
 ## Editing the configuration
 
 The **Configuration** tab shows every option, grouped by section, with its description. Feeds, API tokens, signature rules and hooks can be added, renamed, reordered and removed.
 
-- **Check** validates the edited configuration exactly as startup would (unknown keys, value types, cron schedules, signature files, `ffmpeg` availability) and shows a preview of the file that will be written. Nothing is written.
+- **Check** validates the edited configuration exactly as startup would (unknown keys, value types, cron schedules, signature files, `ffmpeg` availability) and shows a preview of the file that will be written. Nothing is written. Each problem is listed with the option it concerns; the option is highlighted in the form, and clicking the problem jumps to it.
 - **Save** validates again, writes the file and applies it immediately: feeds, tokens and other [reloadable settings](../README.md#reloading-the-configuration) take effect right away, and the result lists added, updated and removed feeds. An invalid configuration is never written.
 - **Settings that need a restart** (`[server]`, `[storage]`, `[database]`, `[downloader]`, `[log]`, `[signatures]`, `[audiobookshelf]`, `[admin]`) are saved but show a banner until Podsync is restarted.
+
+### Files and folders
+
+- **Audiobookshelf directory:** a feed's `audiobookshelf.directory` suggests the folders that already exist under the running `audiobookshelf.podcast_root`.
+- **Signature files:** a signature rule's `file` suggests the clips in that feed's signatures folder (`<signatures root>/<feed ID>/signatures/`), and **Upload…** adds one. Uploads must be audio (wav, mp3, m4a, flac, ogg, opus or aac, up to 50 MB) and are checked with `ffprobe` when it is installed. Uploading a name that already exists asks before replacing it. Uploads are logged with the admin user name.
+
+Both use the running configuration: after changing `podcast_root` or `[signatures] root_dir`, save (and restart for `[signatures]`) before browsing.
 
 ### How the file is written
 
@@ -167,6 +180,12 @@ The dashboard is backed by a small JSON API on the admin port (all endpoints req
 | `GET /api/config/backups` | Saved versions, newest first. |
 | `POST /api/config/backups/{name}/restore` | Restore a saved version, given the current `{"version": ...}`. |
 | `POST /api/password-hash` | Hash `{"password": ...}` (12+ characters) for `admin.password_hash`. |
+| `POST /api/feeds/{id}/update` | Queue an immediate update. `202` with `{"queued": false}` when one is already queued or running. |
+| `GET /api/audiobookshelf/directories` | Folders under the running `podcast_root`. |
+| `GET /api/feeds/{id}/signatures` | Signature files for a feed. |
+| `POST /api/feeds/{id}/signatures` | Upload a signature file (multipart field `file`, optional `replace=true`). `409` if the name exists. |
+
+Validation errors are returned as `{"path": [...], "message": ...}`, where `path` names the option (list indexes as strings) and is omitted for problems that are not about one option.
 
 Masked secrets are sent as `__podsync_secret_unchanged__`; sending that value back keeps the current secret.
 
