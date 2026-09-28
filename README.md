@@ -195,7 +195,7 @@ The Audiobookshelf directory mirrors Podsync in both directions: episodes remove
 
 ### Admin interface
 
-An optional, authenticated dashboard runs on its own port (default 8081), separate from the public podcast server. It shows each feed's schedule, last run, errors, episode counts and Audiobookshelf export, and lists every configuration option. It is designed to sit behind an authenticating reverse proxy such as SWAG with Authelia, Authentik or Keycloak (via oauth2-proxy), with a password mode as a fallback:
+An optional, authenticated admin interface runs on its own port (default 8081), separate from the public podcast server. It shows each feed's schedule, last run, errors, episode counts and Audiobookshelf export, and edits every configuration option: changes are validated, saved to the configuration file (with the previous version kept for one-click restore) and applied immediately. Secrets are write-only, and hand edits are detected rather than overwritten. It is designed to sit behind an authenticating reverse proxy such as SWAG with Authelia, Authentik or Keycloak (via oauth2-proxy), with a password mode as a fallback:
 
 ```toml
 [admin]

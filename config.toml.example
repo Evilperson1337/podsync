@@ -203,7 +203,9 @@ podcast_root = "/data/media/podcasts"
     enabled = true
     categories = ["sponsor", "intro", "outro"]
 
-# Optional admin interface: a dashboard on its own port, meant to sit behind an authenticating reverse proxy.
+# Optional admin interface: a dashboard and configuration editor on its own port, meant to sit behind an
+# authenticating reverse proxy. Saving from the editor rewrites this file (comments are not kept; previous
+# versions are kept as <name>.bak.<time> and can be restored from the History tab).
 # Keep this port private (do not publish it directly); route an admin hostname to it through your proxy.
 # See docs/admin.md.
 [admin]

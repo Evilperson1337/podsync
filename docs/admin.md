@@ -1,10 +1,10 @@
 # Admin Interface
 
-Podsync includes an optional admin interface: a dashboard showing every feed's schedule, last run, errors, episode counts and Audiobookshelf export, plus a reference of every configuration option.
+Podsync includes an optional admin interface: a dashboard showing every feed's schedule, last run, errors, episode counts and Audiobookshelf export, and an editor for every configuration option.
 
 It runs on **its own port**, separate from the podcast server. Podcast apps need unauthenticated access to feeds and episodes, while the admin interface must never be public; keeping them on different listeners lets a reverse proxy protect one without affecting the other.
 
-The admin interface is read-only for now. Editing the configuration from it is planned; until then, edit the configuration file and Podsync [reloads it automatically](../README.md#reloading-the-configuration).
+The configuration file stays the source of truth. The editor reads and writes that file, and you can keep editing it by hand as a fallback.
 
 ## Enable it
 
@@ -118,6 +118,40 @@ user_header = "X-Auth-Request-Preferred-Username"
 
 (`X-Auth-Request-User` also works if you prefer the Keycloak user ID over the user name.)
 
+## Editing the configuration
+
+The **Configuration** tab shows every option, grouped by section, with its description. Feeds, API tokens, signature rules and hooks can be added, renamed, reordered and removed.
+
+- **Check** validates the edited configuration exactly as startup would (unknown keys, value types, cron schedules, signature files, `ffmpeg` availability) and shows a preview of the file that will be written. Nothing is written.
+- **Save** validates again, writes the file and applies it immediately: feeds, tokens and other [reloadable settings](../README.md#reloading-the-configuration) take effect right away, and the result lists added, updated and removed feeds. An invalid configuration is never written.
+- **Settings that need a restart** (`[server]`, `[storage]`, `[database]`, `[downloader]`, `[log]`, `[signatures]`, `[audiobookshelf]`, `[admin]`) are saved but show a banner until Podsync is restarted.
+
+### How the file is written
+
+The editor writes the whole file in the same format it was in (TOML, YAML or JSON), in a standard order, with each option's description as a comment. **Comments you added by hand are not kept** when the editor saves; the previous file is kept in History (see below), so nothing is lost.
+
+Every write is parsed back and compared with what you saved before anything reaches disk. The file is replaced atomically (written to a temporary file and renamed). If the configuration file itself is a Docker single-file bind mount, renaming is not possible and the file is rewritten in place instead; mount the directory that contains the file to get atomic saves (see [Reloading the configuration](../README.md#reloading-the-configuration)).
+
+### Hand edits and conflicts
+
+The editor remembers which version of the file it loaded. If the file changes before you save (you edited it by hand, or another admin saved), the save is refused and nothing is overwritten; load the current file and redo your change. Hand edits are applied by the normal [file watcher](../README.md#reloading-the-configuration).
+
+### Secrets
+
+API tokens and the admin password hash are **write-only**. They are never sent to the browser: the editor shows "Set (hidden)", and you can replace or remove a value but not read it. Unchanged secrets are kept from the file on save.
+
+The admin password is set with **Set password** under `[admin]`: the password is hashed on the server with bcrypt, and only the hash is written. It takes effect after a restart.
+
+### Environment overrides
+
+Options set by environment variables (`PODSYNC__<SECTION>__<KEY>` or `PODSYNC_<PROVIDER>_API_KEY`) are shown disabled with the variable's name: the environment wins over the file, so editing them would have no effect. Environment values are never written to the file.
+
+### History
+
+Every save and restore first keeps the replaced file next to the configuration as `<name>.bak.<UTC time>` (the last 10 versions, readable only by the Podsync user because they contain secrets). The **History** tab lists them; **Restore** writes a version back byte for byte, including its original comments, and applies it. Restoring also keeps the version it replaces, so a restore can itself be undone.
+
+Every save and restore is logged with the admin user name.
+
 ## API
 
 The dashboard is backed by a small JSON API on the admin port (all endpoints require authentication):
@@ -127,5 +161,13 @@ The dashboard is backed by a small JSON API on the admin port (all endpoints req
 | `GET /api/me` | The signed-in user, auth mode and Podsync version. |
 | `GET /api/status` | Every configured feed with schedule, next run, last success/failure, episode counts by state and Audiobookshelf link count. |
 | `GET /api/schema` | JSON Schema of the configuration, generated from Podsync's configuration types. Secret values are marked `x-secret`. |
+| `GET /api/config` | The configuration file as a document, with secrets masked, its `version`, environment overrides and sections waiting for a restart. |
+| `POST /api/config/validate` | Validate `{"document": ...}` without writing; returns errors, restart-only sections and a preview. |
+| `PUT /api/config` | Save `{"document": ..., "version": ...}`. `409` if the file changed since `version`, `422` if invalid. |
+| `GET /api/config/backups` | Saved versions, newest first. |
+| `POST /api/config/backups/{name}/restore` | Restore a saved version, given the current `{"version": ...}`. |
+| `POST /api/password-hash` | Hash `{"password": ...}` (12+ characters) for `admin.password_hash`. |
 
-State-changing requests (added with configuration editing) must include an `X-Podsync-Admin` header and come from the same origin.
+Masked secrets are sent as `__podsync_secret_unchanged__`; sending that value back keeps the current secret.
+
+State-changing requests must include an `X-Podsync-Admin` header and come from the same origin.
