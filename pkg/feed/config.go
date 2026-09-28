@@ -24,11 +24,11 @@ type Config struct {
 	// NOTE: too often update check might drain your API token.
 	CronSchedule string `toml:"cron_schedule"`
 	// Quality to use for this feed
-	Quality model.Quality `toml:"quality"`
+	Quality model.Quality `toml:"quality" enum:"high,low"`
 	// Maximum height of video
 	MaxHeight int `toml:"max_height"`
 	// Format to use for this feed
-	Format model.Format `toml:"format"`
+	Format model.Format `toml:"format" enum:"audio,video,custom"`
 	// Custom format properties
 	CustomFormat CustomFormat `toml:"custom_format"`
 	// Only download episodes that match the filters (defaults to matching anything)
@@ -61,7 +61,7 @@ type Config struct {
 	// Private feed (not indexed by podcast aggregators)
 	PrivateFeed bool `toml:"private_feed"`
 	// Playlist sort
-	PlaylistSort model.Sorting `toml:"playlist_sort"`
+	PlaylistSort model.Sorting `toml:"playlist_sort" enum:"asc,desc"`
 	// SignatureRules configures audio signature trimming for this feed. When set, it replaces
 	// <signatures_root>/<feed_id>/signatures/rules.json.
 	SignatureRules []SignatureRule `toml:"signature_rules"`

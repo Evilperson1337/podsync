@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
+	"github.com/mxpv/podsync/pkg/configschema"
 )
 
 // Signature trim actions.
@@ -31,7 +33,7 @@ type SignatureRule struct {
 	// File is the signature audio file, relative to <signatures_root>/<feed_id>/signatures/ or absolute.
 	File string `toml:"file" json:"file"`
 	// Action is one of cut_before, cut_after, remove_segment.
-	Action string `toml:"action" json:"action"`
+	Action string `toml:"action" json:"action" enum:"cut_before,cut_after,remove_segment"`
 	// PreSeconds is padding before signature_start.
 	PreSeconds Number `toml:"pre" json:"pre"`
 	// PostSeconds is padding after signature_end.
@@ -60,6 +62,11 @@ func (n *Number) UnmarshalTOML(value interface{}) error {
 		return errors.Errorf("expected a number, got %v (%T)", value, value)
 	}
 	return nil
+}
+
+// ConfigSchema describes Number for the admin interface.
+func (Number) ConfigSchema() configschema.Schema {
+	return configschema.Schema{Type: "number"}
 }
 
 // Seconds converts a number of seconds to a time.Duration.
