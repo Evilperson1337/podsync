@@ -49,10 +49,22 @@ type EnvOverride struct {
 	Variable string   `json:"variable"`
 }
 
+// ValidationIssue is one problem in a candidate configuration. Path points at the option it
+// concerns (list indexes as decimal strings) and is empty for problems not tied to one option.
+type ValidationIssue struct {
+	Path    []string `json:"path,omitempty"`
+	Message string   `json:"message"`
+}
+
+// Issue creates a ValidationIssue.
+func Issue(message string, path ...string) ValidationIssue {
+	return ValidationIssue{Path: path, Message: message}
+}
+
 // Validation is the result of checking a candidate configuration.
 type Validation struct {
-	Valid  bool     `json:"valid"`
-	Errors []string `json:"errors,omitempty"`
+	Valid  bool              `json:"valid"`
+	Errors []ValidationIssue `json:"errors,omitempty"`
 	// RestartRequired lists sections that would change but only take effect after a restart.
 	RestartRequired []string `json:"restart_required,omitempty"`
 	// Preview is the file that would be written.

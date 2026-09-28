@@ -269,3 +269,16 @@ fieldset.plain:disabled { opacity: 0.6; }
   font: 12px/1.45 ui-monospace, Menlo, monospace;
   white-space: pre;
 }
+
+/* Validation issues */
+.field.invalid, details.invalid { box-shadow: inset 3px 0 0 var(--bad); padding-left: 10px; }
+.issue-note { font-weight: 600; margin: 0 0 4px; }
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: 600 13px ui-monospace, Menlo, monospace;
+  cursor: pointer;
+  text-decoration: underline;
+}

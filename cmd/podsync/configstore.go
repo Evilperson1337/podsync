@@ -88,7 +88,7 @@ func (s *fileConfigStore) Validate(document map[string]interface{}) (admin.Valid
 func (s *fileConfigStore) check(document map[string]interface{}) ([]byte, admin.Validation) {
 	normalized, err := normalizeConfigValue(document, "")
 	if err != nil {
-		return nil, admin.Validation{Errors: []string{err.Error()}}
+		return nil, admin.Validation{Errors: []admin.ValidationIssue{admin.Issue(err.Error())}}
 	}
 	values, _ := normalized.(map[string]interface{})
 	if values == nil {
@@ -96,7 +96,7 @@ func (s *fileConfigStore) check(document map[string]interface{}) ([]byte, admin.
 	}
 	rendered, err := renderConfig(s.format(), values, s.schema)
 	if err != nil {
-		return nil, admin.Validation{Errors: []string{err.Error()}}
+		return nil, admin.Validation{Errors: []admin.ValidationIssue{admin.Issue(err.Error())}}
 	}
 	return rendered, s.checkContent(rendered)
 }
@@ -111,7 +111,7 @@ func (s *fileConfigStore) checkContent(data []byte) admin.Validation {
 	}
 	if s.validateRuntime != nil {
 		if err := s.validateRuntime(cfg); err != nil {
-			validation.Errors = []string{err.Error()}
+			validation.Errors = []admin.ValidationIssue{admin.Issue(err.Error())}
 			return validation
 		}
 	}
@@ -124,17 +124,18 @@ func (s *fileConfigStore) checkContent(data []byte) admin.Validation {
 	return validation
 }
 
-// splitConfigErrors turns a validation error into one message per problem.
-func splitConfigErrors(err error) []string {
+// splitConfigErrors turns a validation error into one issue per problem, keeping the option path
+// of each where the validator attached one.
+func splitConfigErrors(err error) []admin.ValidationIssue {
 	var multi *multierror.Error
 	if errors.As(err, &multi) && len(multi.Errors) > 0 {
-		messages := make([]string, 0, len(multi.Errors))
+		issues := make([]admin.ValidationIssue, 0, len(multi.Errors))
 		for _, item := range multi.Errors {
-			messages = append(messages, item.Error())
+			issues = append(issues, admin.Issue(item.Error(), configschema.ErrorPath(item)...))
 		}
-		return messages
+		return issues
 	}
-	return []string{err.Error()}
+	return []admin.ValidationIssue{admin.Issue(err.Error(), configschema.ErrorPath(err)...)}
 }
 
 // Save writes a document to the configuration file if the file is still at version.

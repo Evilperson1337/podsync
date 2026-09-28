@@ -84,23 +84,27 @@ func (r SignatureRule) MaxMatchCount() int {
 
 // Validate checks the rule's fields. It does not check that the signature file exists.
 func (r SignatureRule) Validate() error {
+	at := configschema.NewFieldError
 	if strings.TrimSpace(r.File) == "" {
-		return errors.New("file is required")
+		return at(errors.New("file is required"), "file")
 	}
 	if !slices.Contains(ValidSignatureActions(), r.Action) {
-		return errors.Errorf("action %q must be one of %s", r.Action, strings.Join(ValidSignatureActions(), ", "))
+		return at(errors.Errorf("action %q must be one of %s", r.Action, strings.Join(ValidSignatureActions(), ", ")), "action")
 	}
-	if r.PreSeconds < 0 || r.PostSeconds < 0 {
-		return errors.New("pre and post must not be negative")
+	if r.PreSeconds < 0 {
+		return at(errors.New("pre must not be negative"), "pre")
+	}
+	if r.PostSeconds < 0 {
+		return at(errors.New("post must not be negative"), "post")
 	}
 	if r.MaxMatches < 0 {
-		return errors.New("max_matches must not be negative")
+		return at(errors.New("max_matches must not be negative"), "max_matches")
 	}
 	if r.MinScore < 0 || r.MinScore > 1 {
-		return errors.Errorf("min_score %g must be between 0 and 1", r.MinScore)
+		return at(errors.Errorf("min_score %g must be between 0 and 1", r.MinScore), "min_score")
 	}
 	if r.MinPeakRatio < 0 {
-		return errors.Errorf("min_peak_ratio %g must not be negative", r.MinPeakRatio)
+		return at(errors.Errorf("min_peak_ratio %g must not be negative", r.MinPeakRatio), "min_peak_ratio")
 	}
 	return nil
 }

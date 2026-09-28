@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
@@ -106,11 +107,13 @@ func loadConfigData(path string, data []byte) (*Config, error) {
 		return nil, errors.Wrapf(err, "failed to decode %s", path)
 	}
 	if unknown := findUnknownConfigKeys(tree, reflect.TypeOf(config)); len(unknown) > 0 {
-		keys := make([]string, 0, len(unknown))
+		var result *multierror.Error
 		for _, key := range unknown {
-			keys = append(keys, key.String())
+			result = multierror.Append(result, configschema.NewFieldError(
+				errors.Errorf("unknown configuration key %s in %s; check for typos or misplaced sections", key.String(), path),
+				key.Segments...))
 		}
-		return nil, errors.Errorf("unknown configuration keys in %s (check for typos or misplaced sections): %s", path, strings.Join(keys, ", "))
+		return nil, result
 	}
 
 	for id, f := range config.Feeds {
@@ -146,36 +149,36 @@ func (c *Config) validate() error {
 	if c.Server.Path != "" {
 		var pathReg = regexp.MustCompile(model.PathRegex)
 		if !pathReg.MatchString(c.Server.Path) {
-			result = multierror.Append(result, errors.Errorf("Server handle path must be match %s or empty", model.PathRegex))
+			result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("Server handle path must be match %s or empty", model.PathRegex), "server", "path"))
 		}
 	}
 
 	switch c.Storage.Type {
 	case "local":
 		if c.Storage.Local.DataDir == "" {
-			result = multierror.Append(result, errors.New("data directory is required for local storage"))
+			result = multierror.Append(result, configschema.NewFieldError(errors.New("data directory is required for local storage"), "storage", "local", "data_dir"))
 		}
 	case "s3":
 		if c.Storage.S3.EndpointURL == "" || c.Storage.S3.Region == "" || c.Storage.S3.Bucket == "" {
-			result = multierror.Append(result, errors.New("S3 storage requires endpoint_url, region and bucket to be set"))
+			result = multierror.Append(result, configschema.NewFieldError(errors.New("S3 storage requires endpoint_url, region and bucket to be set"), "storage", "s3"))
 		}
 		if strings.Contains(c.Server.Hostname, "localhost") || strings.Contains(c.Server.Hostname, "127.0.0.1") {
-			result = multierror.Append(result, errors.New("server.hostname must be externally reachable when using S3 storage"))
+			result = multierror.Append(result, configschema.NewFieldError(errors.New("server.hostname must be externally reachable when using S3 storage"), "server", "hostname"))
 		}
 	default:
-		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("unknown storage type: %s", c.Storage.Type), "storage", "type"))
 	}
 
 	for id, f := range c.Feeds {
 		mergeFeedCustom(f)
 
 		if f.URL == "" {
-			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
+			result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("URL is required for %q", id), "feeds", id, "url"))
 		}
 
 		if f.CronSchedule != "" {
 			if _, err := cron.ParseStandard(f.CronSchedule); err != nil {
-				result = multierror.Append(result, errors.Wrapf(err, "invalid cron_schedule %q for %q", f.CronSchedule, id))
+				result = multierror.Append(result, configschema.NewFieldError(errors.Wrapf(err, "invalid cron_schedule %q for %q", f.CronSchedule, id), "feeds", id, "cron_schedule"))
 			}
 		}
 
@@ -192,12 +195,12 @@ func (c *Config) validate() error {
 		if rssURL := strings.TrimSpace(f.Custom.RSSMetadataURL); rssURL != "" {
 			parsed, err := url.ParseRequestURI(rssURL)
 			if err != nil {
-				result = multierror.Append(result, errors.Wrapf(err, "invalid rss_metadata_url for %q", id))
+				result = multierror.Append(result, configschema.NewFieldError(errors.Wrapf(err, "invalid rss_metadata_url for %q", id), "feeds", id, "custom", "rss_metadata_url"))
 				continue
 			}
 
 			if parsed.Scheme != "http" && parsed.Scheme != "https" {
-				result = multierror.Append(result, errors.Errorf("rss_metadata_url for %q must use http or https", id))
+				result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("rss_metadata_url for %q must use http or https", id), "feeds", id, "custom", "rss_metadata_url"))
 			}
 		}
 
@@ -259,7 +262,11 @@ func (c *Config) validateSignatureRules(feedID string, f *feed.Config) error {
 	var result *multierror.Error
 	for idx, rule := range f.SignatureRules {
 		if err := checkSignatureRule(root, feedID, rule); err != nil {
-			result = multierror.Append(result, errors.Wrapf(err, "signature_rules[%d] for %q", idx, feedID))
+			path := []string{"feeds", feedID, "signature_rules", strconv.Itoa(idx)}
+			if fieldPath := configschema.ErrorPath(err); fieldPath != nil {
+				path = append(path, fieldPath...)
+			}
+			result = multierror.Append(result, configschema.NewFieldError(errors.Wrapf(err, "signature_rules[%d] for %q", idx, feedID), path...))
 		}
 	}
 	return result.ErrorOrNil()
@@ -288,14 +295,14 @@ func checkSignatureRule(root, feedID string, rule feed.SignatureRule) error {
 	}
 	path := update.SignatureFilePath(root, feedID, rule.File)
 	if path == "" {
-		return errors.Errorf("relative file %q needs [signatures] root_dir (or an absolute path) when not using local storage", rule.File)
+		return configschema.NewFieldError(errors.Errorf("relative file %q needs [signatures] root_dir (or an absolute path) when not using local storage", rule.File), "file")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return errors.Wrapf(err, "signature file %q is not accessible", path)
+		return configschema.NewFieldError(errors.Wrapf(err, "signature file %q is not accessible", path), "file")
 	}
 	if info.IsDir() || info.Size() == 0 {
-		return errors.Errorf("signature file %q is empty or not a file", path)
+		return configschema.NewFieldError(errors.Errorf("signature file %q is empty or not a file", path), "file")
 	}
 	return nil
 }
@@ -314,7 +321,7 @@ func (c *Config) validateAdmin() error {
 		serverPort = 8080
 	}
 	if c.Admin.Port == serverPort && c.Storage.Type != "s3" {
-		return errors.Errorf("admin.port %d must differ from server.port; the admin interface needs its own listener", c.Admin.Port)
+		return configschema.NewFieldError(errors.Errorf("admin.port %d must differ from server.port; the admin interface needs its own listener", c.Admin.Port), "admin", "port")
 	}
 	return nil
 }
@@ -325,10 +332,10 @@ func (c *Config) validateAudiobookshelf() error {
 	}
 	var result *multierror.Error
 	if strings.TrimSpace(c.Audiobookshelf.PodcastRoot) == "" {
-		result = multierror.Append(result, errors.New("audiobookshelf.podcast_root is required when audiobookshelf export is enabled"))
+		result = multierror.Append(result, configschema.NewFieldError(errors.New("audiobookshelf.podcast_root is required when audiobookshelf export is enabled"), "audiobookshelf", "podcast_root"))
 	}
 	if c.Storage.Type != "local" {
-		result = multierror.Append(result, errors.Errorf("audiobookshelf export requires local storage (hardlinks cannot be created from %q storage)", c.Storage.Type))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("audiobookshelf export requires local storage (hardlinks cannot be created from %q storage)", c.Storage.Type), "audiobookshelf", "enabled"))
 	}
 	return result.ErrorOrNil()
 }
@@ -338,7 +345,7 @@ func validateFeedAudiobookshelf(feedID string, cfg audiobookshelf.FeedConfig, gl
 		return nil
 	}
 	if err := audiobookshelf.ValidateDirectory(cfg.Directory); err != nil {
-		return errors.Wrapf(err, "invalid audiobookshelf.directory for %q", feedID)
+		return configschema.NewFieldError(errors.Wrapf(err, "invalid audiobookshelf.directory for %q", feedID), "feeds", feedID, "audiobookshelf", "directory")
 	}
 	if !globalEnabled {
 		log.Warnf("audiobookshelf export is enabled for feed %q but disabled globally; set [audiobookshelf] enabled = true to export", feedID)
@@ -499,7 +506,7 @@ func isCustomZero(cfg feed.Custom) bool {
 func validateSponsorBlockConfig(feedID string, cfg feed.SponsorBlock) error {
 	for _, category := range cfg.Categories {
 		if !slices.Contains(feed.ValidSponsorBlockCategories(), category) {
-			return errors.Errorf("invalid sponsorblock category %q for %q", category, feedID)
+			return configschema.NewFieldError(errors.Errorf("invalid sponsorblock category %q for %q", category, feedID), "feeds", feedID, "custom", "sponsorblock", "categories")
 		}
 	}
 	return nil
@@ -511,33 +518,36 @@ func validateCustomFormat(feedID string, cfg *feed.Config) error {
 	}
 	var result *multierror.Error
 	if strings.TrimSpace(cfg.CustomFormat.Extension) == "" {
-		result = multierror.Append(result, errors.Errorf("custom_format.extension is required for %q when format=custom", feedID))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("custom_format.extension is required for %q when format=custom", feedID), "feeds", feedID, "custom_format", "extension"))
 	}
 	if strings.TrimSpace(cfg.CustomFormat.YouTubeDLFormat) == "" {
-		result = multierror.Append(result, errors.Errorf("custom_format.youtube_dl_format is required for %q when format=custom", feedID))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("custom_format.youtube_dl_format is required for %q when format=custom", feedID), "feeds", feedID, "custom_format", "youtube_dl_format"))
 	}
 	return result.ErrorOrNil()
 }
 
 func validateHooks(feedID string, hooks []*feed.ExecHook, field string) error {
 	for idx, hook := range hooks {
+		at := func(err error, key ...string) error {
+			return configschema.NewFieldError(err, append([]string{"feeds", feedID, field, strconv.Itoa(idx)}, key...)...)
+		}
 		if hook == nil {
-			return errors.Errorf("%s[%d] for %q cannot be nil", field, idx, feedID)
+			return at(errors.Errorf("%s[%d] for %q cannot be nil", field, idx, feedID))
 		}
 		if len(hook.Command) == 0 {
-			return errors.Errorf("%s[%d] for %q must define command", field, idx, feedID)
+			return at(errors.Errorf("%s[%d] for %q must define command", field, idx, feedID), "command")
 		}
 		if hook.Timeout < 0 {
-			return errors.Errorf("%s[%d] for %q timeout must be non-negative", field, idx, feedID)
+			return at(errors.Errorf("%s[%d] for %q timeout must be non-negative", field, idx, feedID), "timeout")
 		}
 		switch strings.ToLower(strings.TrimSpace(hook.Shell)) {
 		case "", "none", "cmd", "powershell", "pwsh":
 		case "sh":
 			if runtime.GOOS == "windows" {
-				return errors.Errorf("%s[%d] for %q cannot use shell=sh on Windows", field, idx, feedID)
+				return at(errors.Errorf("%s[%d] for %q cannot use shell=sh on Windows", field, idx, feedID), "shell")
 			}
 		default:
-			return errors.Errorf("%s[%d] for %q uses unsupported shell %q", field, idx, feedID, hook.Shell)
+			return at(errors.Errorf("%s[%d] for %q uses unsupported shell %q", field, idx, feedID, hook.Shell), "shell")
 		}
 	}
 	return nil

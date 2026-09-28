@@ -40,7 +40,7 @@ port = 8080
   page_sise = 10
   filters = { titel = "x" }
 `,
-			want: []string{"feeds.A.page_sise (line 9)", "feeds.A.filters.titel"},
+			want: []string{"feeds.A.page_sise (line 9)", "feeds.A.filters.titel in"},
 		},
 		{
 			name: "singular array-of-tables name",
@@ -84,7 +84,7 @@ port = 8080
 
 			_, err := LoadConfig(path)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "unknown configuration keys")
+			assert.Contains(t, err.Error(), "unknown configuration key")
 			for _, want := range tt.want {
 				assert.Contains(t, err.Error(), want)
 			}
@@ -118,4 +118,15 @@ vimeo = ["b", "c"]
 	assert.Len(t, config.Feeds, 2)
 	assert.Equal(t, "Case Sensitive Tag", config.Feeds["any_feed-ID"].Custom.OwnerName)
 	assert.NotEmpty(t, config.Feeds["ANOTHER"].URL, "keys are matched case-insensitively like the decoder")
+}
+
+func TestUnknownKeyErrorsCarryPaths(t *testing.T) {
+	path := setup(t, "[feeds]\n  [feeds.A]\n  url = \"x\"\n  [[feeds.A.post_episode_download]]\n  comand = [\"echo\"]\n")
+	defer os.Remove(path)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	issues := splitConfigErrors(err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, []string{"feeds", "A", "post_episode_download", "0", "comand"}, issues[0].Path)
 }

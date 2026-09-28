@@ -189,7 +189,7 @@ func TestSaveConfigConflict(t *testing.T) {
 func TestSaveConfigInvalid(t *testing.T) {
 	store := sampleStore()
 	store.saveErr = ErrInvalid
-	store.validation = Validation{Valid: false, Errors: []string{"URL is required for \"show\""}}
+	store.validation = Validation{Valid: false, Errors: []ValidationIssue{Issue("URL is required for \"show\"", "feeds", "show", "url")}}
 	srv := newEditorServer(t, store)
 
 	rec := serve(srv, editorRequest(http.MethodPut, "/api/config", `{"version": "v1", "document": {}}`, true))
@@ -197,7 +197,7 @@ func TestSaveConfigInvalid(t *testing.T) {
 	var response errorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 	require.NotNil(t, response.Validation)
-	assert.Equal(t, []string{"URL is required for \"show\""}, response.Validation.Errors)
+	assert.Equal(t, []ValidationIssue{{Path: []string{"feeds", "show", "url"}, Message: "URL is required for \"show\""}}, response.Validation.Errors)
 }
 
 func TestSaveConfigUnknownSecretPlaceholder(t *testing.T) {

@@ -93,12 +93,16 @@ func TestConfigStoreValidate(t *testing.T) {
 	validation, err = fx.store.Validate(document)
 	require.NoError(t, err)
 	assert.False(t, validation.Valid)
-	assert.Len(t, validation.Errors, 2, "each problem is reported separately: %v", validation.Errors)
+	require.Len(t, validation.Errors, 2, "each problem is reported separately: %v", validation.Errors)
+	paths := [][]string{validation.Errors[0].Path, validation.Errors[1].Path}
+	assert.ElementsMatch(t, [][]string{{"feeds", "show", "url"}, {"feeds", "other", "cron_schedule"}}, paths, "each problem points at its option")
 
 	validation, err = fx.store.Validate(map[string]interface{}{"sever": map[string]interface{}{}})
 	require.NoError(t, err)
 	assert.False(t, validation.Valid)
-	assert.Contains(t, strings.Join(validation.Errors, " "), "sever")
+	require.Len(t, validation.Errors, 1)
+	assert.Contains(t, validation.Errors[0].Message, "sever")
+	assert.Equal(t, []string{"sever"}, validation.Errors[0].Path)
 }
 
 func TestConfigStoreSave(t *testing.T) {

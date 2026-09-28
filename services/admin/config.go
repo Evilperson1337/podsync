@@ -6,6 +6,8 @@ import (
 
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/mxpv/podsync/pkg/configschema"
 )
 
 // Authentication modes for the admin interface.
@@ -71,28 +73,29 @@ func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
+	at := func(err error, key string) error { return configschema.NewFieldError(err, "admin", key) }
 	if c.Port < 1 || c.Port > 65535 {
-		return errors.Errorf("admin.port %d is not a valid port", c.Port)
+		return at(errors.Errorf("admin.port %d is not a valid port", c.Port), "port")
 	}
 	switch c.Auth {
 	case AuthProxy:
 		if len(c.TrustedProxies) == 0 {
-			return errors.New(`admin.trusted_proxies is required when admin.auth = "proxy"; list the reverse proxy's address or network`)
+			return at(errors.New(`admin.trusted_proxies is required when admin.auth = "proxy"; list the reverse proxy's address or network`), "trusted_proxies")
 		}
 		if _, err := parseTrustedProxies(c.TrustedProxies); err != nil {
-			return err
+			return at(err, "trusted_proxies")
 		}
 	case AuthPassword:
 		if strings.TrimSpace(c.PasswordHash) == "" {
-			return errors.New(`admin.password_hash is required when admin.auth = "password"; generate one with podsync --hash-password`)
+			return at(errors.New(`admin.password_hash is required when admin.auth = "password"; generate one with podsync --hash-password`), "password_hash")
 		}
 		if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
-			return errors.Wrap(err, "admin.password_hash is not a valid bcrypt hash; generate one with podsync --hash-password")
+			return at(errors.Wrap(err, "admin.password_hash is not a valid bcrypt hash; generate one with podsync --hash-password"), "password_hash")
 		}
 	case "":
-		return errors.New(`admin.auth is required when the admin interface is enabled: "proxy" or "password"`)
+		return at(errors.New(`admin.auth is required when the admin interface is enabled: "proxy" or "password"`), "auth")
 	default:
-		return errors.Errorf(`admin.auth %q must be "proxy" or "password"`, c.Auth)
+		return at(errors.Errorf(`admin.auth %q must be "proxy" or "password"`, c.Auth), "auth")
 	}
 	return nil
 }

@@ -17,6 +17,8 @@
     openPaths: new Set(),
     // pending holds new map entries (such as a token provider) that have no value yet, by map path.
     pending: {},
+    // issues are the latest validation problems, re-applied as highlights after each render.
+    issues: [],
     loading: null,
   };
 
@@ -125,13 +127,76 @@
 
   function message(container, tone, title, items, action) {
     const box = el("div", { class: `notice ${tone}` }, [el("div", { class: "notice-title", text: title })]);
-    if (items && items.length) box.append(el("ul", {}, items.map((item) => el("li", { text: item }))));
+    if (items && items.length) box.append(el("ul", {}, issueList(items)));
     if (action) box.append(action);
     container.replaceChildren(box);
   }
 
   function clearMessages() {
     document.getElementById("editor-messages").replaceChildren();
+  }
+
+  // ----- validation issues -----
+
+  function issueText(issue) {
+    return typeof issue === "string" ? issue : issue.message;
+  }
+
+  // issueTarget finds the element for an issue: the option itself, or the closest enclosing
+  // section that exists (for example for an unknown key).
+  function issueTarget(path) {
+    for (let length = path.length; length > 0; length--) {
+      const key = path.slice(0, length).join(".");
+      const node = document.querySelector(`#editor-form [data-path="${key.replace(/["\\]/g, "\\$&")}"]`);
+      if (node) return node;
+    }
+    return null;
+  }
+
+  function openAncestors(node) {
+    for (let parent = node; parent; parent = parent.parentElement) {
+      if (parent.tagName === "DETAILS") {
+        parent.open = true;
+        if (parent.dataset.path) state.openPaths.add(pathKey(parent.dataset.path.split(".")));
+      }
+    }
+  }
+
+  function applyIssues() {
+    for (const node of document.querySelectorAll("#editor-form .invalid")) node.classList.remove("invalid");
+    for (const node of document.querySelectorAll("#editor-form .issue-note")) node.remove();
+    for (const issue of state.issues) {
+      if (!issue.path || issue.path.length === 0) continue;
+      const target = issueTarget(issue.path);
+      if (!target) continue;
+      target.classList.add("invalid");
+      openAncestors(target);
+      const note = el("div", { class: "field-error issue-note", text: issue.message });
+      const place = target.matches(".field") ? target.querySelector(".field-control") : target.querySelector(":scope > .body") || target;
+      place.prepend(note);
+    }
+  }
+
+  function setIssues(issues) {
+    state.issues = issues || [];
+    applyIssues();
+  }
+
+  // issueList renders issues with their option path; clicking a path shows the option.
+  function issueList(issues) {
+    return issues.map((issue) => {
+      if (typeof issue === "string" || !issue.path || issue.path.length === 0) return el("li", { text: issueText(issue) });
+      const link = el("button", { class: "link-button", type: "button", text: issue.path.join(".") });
+      link.addEventListener("click", () => {
+        const target = issueTarget(issue.path);
+        if (!target) return;
+        openAncestors(target);
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+        const input = target.querySelector("input, select, textarea");
+        if (input) input.focus();
+      });
+      return el("li", {}, [link, " ", el("span", { text: issue.message })]);
+    });
   }
 
   function showRestart(sections) {
@@ -160,6 +225,7 @@
         state.original = clone(state.snapshot.document) || {};
         state.doc = clone(state.original);
         state.pending = {};
+        state.issues = [];
         document.getElementById("editor-file").textContent = `${state.snapshot.path} (${state.snapshot.format.toUpperCase()})`;
         showRestart(state.snapshot.pending_restart);
         showPreview("");
@@ -184,6 +250,7 @@
       sections.push(section([name], name, schema));
     }
     form.replaceChildren(...sections);
+    applyIssues();
   }
 
   function collapsible(path, summaryChildren, bodyChildren, className) {
@@ -504,9 +571,11 @@
     const result = response.data;
     showPreview(result.preview);
     if (result.valid) {
+      setIssues([]);
       const notes = (result.restart_required || []).map((s) => `Changes to [${s}] need a restart.`);
       message(container, "ok", "The configuration is valid.", notes);
     } else {
+      setIssues(result.errors);
       message(container, "error", "The configuration has problems:", result.errors || []);
     }
   }
@@ -525,6 +594,7 @@
         if (result.feeds_updated && result.feeds_updated.length) notes.push(`Feeds updated: ${result.feeds_updated.join(", ")}.`);
         if (result.feeds_removed && result.feeds_removed.length) notes.push(`Feeds removed: ${result.feeds_removed.join(", ")}.`);
         if (result.reload_error) notes.push(`Saved, but applying it reported: ${result.reload_error}`);
+        setIssues([]);
         await load(true);
         message(container, result.reload_error ? "warn" : "ok", "Saved and applied.", notes);
         if (typeof loadStatus === "function") loadStatus();
@@ -540,6 +610,7 @@
       }
       const errors = (response.data && response.data.validation && response.data.validation.errors) || [(response.data && response.data.error) || `HTTP ${response.status}`];
       if (response.data && response.data.validation) showPreview(response.data.validation.preview);
+      setIssues(errors.filter((e) => typeof e !== "string"));
       message(container, "error", "Nothing was saved. Fix these problems:", errors);
     } finally {
       changed();
@@ -550,6 +621,7 @@
     if (!confirm("Discard all unsaved changes?")) return;
     state.doc = clone(state.original);
     state.pending = {};
+    state.issues = [];
     clearMessages();
     showPreview("");
     render();
