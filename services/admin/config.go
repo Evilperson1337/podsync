@@ -1,0 +1,124 @@
+package admin
+
+import (
+	"net"
+	"strings"
+
+	"github.com/pkg/errors"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// Authentication modes for the admin interface.
+const (
+	// AuthProxy trusts a user header set by an authenticating reverse proxy (e.g. SWAG with
+	// Authelia, Authentik or oauth2-proxy for Keycloak), accepted only from trusted proxy addresses.
+	AuthProxy = "proxy"
+	// AuthPassword uses HTTP Basic authentication against a bcrypt password hash.
+	AuthPassword = "password"
+)
+
+// Defaults for the admin interface.
+const (
+	DefaultPort       = 8081
+	DefaultUserHeader = "Remote-User"
+	DefaultUsername   = "admin"
+)
+
+// Config configures the admin interface, a separate listener from the podcast server so that it
+// can be protected without affecting public feed and episode URLs.
+//
+//	[admin]
+//	enabled = true
+//	port = 8081
+//	auth = "proxy"
+//	trusted_proxies = ["172.18.0.0/16"]
+type Config struct {
+	// Enabled starts the admin interface. Disabled by default.
+	Enabled bool `toml:"enabled"`
+	// BindAddress is the address to listen on. Empty or "*" listens on all addresses.
+	BindAddress string `toml:"bind_address"`
+	// Port is the admin listener port (default 8081). It must differ from the podcast server port.
+	Port int `toml:"port"`
+	// Auth is the authentication mode: "proxy" or "password".
+	Auth string `toml:"auth" enum:"proxy,password"`
+	// TrustedProxies lists IP addresses or CIDR ranges of the reverse proxy (proxy mode).
+	// Requests from any other address are rejected.
+	TrustedProxies []string `toml:"trusted_proxies"`
+	// UserHeader is the header carrying the authenticated user name (proxy mode, default "Remote-User").
+	UserHeader string `toml:"user_header"`
+	// Username is the login name (password mode, default "admin").
+	Username string `toml:"username"`
+	// PasswordHash is a bcrypt hash of the admin password (password mode). Generate one with
+	// podsync --hash-password.
+	PasswordHash string `toml:"password_hash" secret:"true"`
+}
+
+// ApplyDefaults fills unset fields.
+func (c *Config) ApplyDefaults() {
+	if c.Port == 0 {
+		c.Port = DefaultPort
+	}
+	if strings.TrimSpace(c.UserHeader) == "" {
+		c.UserHeader = DefaultUserHeader
+	}
+	if strings.TrimSpace(c.Username) == "" {
+		c.Username = DefaultUsername
+	}
+}
+
+// Validate checks an enabled admin configuration.
+func (c Config) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Port < 1 || c.Port > 65535 {
+		return errors.Errorf("admin.port %d is not a valid port", c.Port)
+	}
+	switch c.Auth {
+	case AuthProxy:
+		if len(c.TrustedProxies) == 0 {
+			return errors.New(`admin.trusted_proxies is required when admin.auth = "proxy"; list the reverse proxy's address or network`)
+		}
+		if _, err := parseTrustedProxies(c.TrustedProxies); err != nil {
+			return err
+		}
+	case AuthPassword:
+		if strings.TrimSpace(c.PasswordHash) == "" {
+			return errors.New(`admin.password_hash is required when admin.auth = "password"; generate one with podsync --hash-password`)
+		}
+		if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
+			return errors.Wrap(err, "admin.password_hash is not a valid bcrypt hash; generate one with podsync --hash-password")
+		}
+	case "":
+		return errors.New(`admin.auth is required when the admin interface is enabled: "proxy" or "password"`)
+	default:
+		return errors.Errorf(`admin.auth %q must be "proxy" or "password"`, c.Auth)
+	}
+	return nil
+}
+
+// parseTrustedProxies parses IP addresses and CIDR ranges.
+func parseTrustedProxies(entries []string) ([]*net.IPNet, error) {
+	networks := make([]*net.IPNet, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if !strings.Contains(entry, "/") {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				return nil, errors.Errorf("admin.trusted_proxies entry %q is not an IP address or CIDR range", entry)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			networks = append(networks, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, network, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, errors.Errorf("admin.trusted_proxies entry %q is not an IP address or CIDR range", entry)
+		}
+		networks = append(networks, network)
+	}
+	return networks, nil
+}

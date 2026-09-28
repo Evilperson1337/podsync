@@ -52,6 +52,7 @@ type feedEnqueuer interface {
 type cronScheduler interface {
 	AddFunc(spec string, cmd func()) (cron.EntryID, error)
 	Remove(id cron.EntryID)
+	Entry(id cron.EntryID) cron.Entry
 }
 
 type scheduledFeed struct {
@@ -145,6 +146,24 @@ func (s *feedSchedule) Apply(feeds map[string]*feed.Config) (feedChanges, error)
 	return changes, nil
 }
 
+// FeedSchedule describes how a feed is scheduled.
+type FeedSchedule struct {
+	Spec string
+	// NextRun is zero when the feed is not scheduled or cron has not started.
+	NextRun time.Time
+}
+
+// Lookup returns the schedule of a feed.
+func (s *feedSchedule) Lookup(id string) (FeedSchedule, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	scheduled, ok := s.entries[id]
+	if !ok {
+		return FeedSchedule{}, false
+	}
+	return FeedSchedule{Spec: feedCronSchedule(scheduled.config), NextRun: s.cron.Entry(scheduled.entry).Next}, true
+}
+
 func (s *feedSchedule) enqueue(cfg *feed.Config, reason string) {
 	enqueued := s.queue.Enqueue(cfg)
 	logger := log.WithFields(log.Fields{"feed_id": cfg.ID, "reason": reason, "enqueued": enqueued})
@@ -178,6 +197,13 @@ type configReloader struct {
 
 	mu      sync.Mutex
 	current *Config
+}
+
+// Current returns the running configuration.
+func (r *configReloader) Current() *Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.current
 }
 
 // FeedCount returns the number of feeds in the running configuration.
@@ -251,6 +277,7 @@ func restartOnlyChanges(before, after *Config) []string {
 		{"log", before.Log, after.Log},
 		{"signatures", before.Signatures, after.Signatures},
 		{"audiobookshelf", before.Audiobookshelf, after.Audiobookshelf},
+		{"admin", before.Admin, after.Admin},
 	}
 	var changed []string
 	for _, section := range sections {

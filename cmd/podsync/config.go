@@ -17,37 +17,41 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/mxpv/podsync/pkg/audiobookshelf"
+	"github.com/mxpv/podsync/pkg/configschema"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/fs"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/pkg/ytdl"
+	"github.com/mxpv/podsync/services/admin"
 	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
 )
 
 type Config struct {
 	// Server is the web server configuration
-	Server web.Config `toml:"server"`
+	Server web.Config `toml:"server" doc:"Podcast web server: port, public hostname and TLS."`
 	// S3 is the optional configuration for S3-compatible storage provider
-	Storage fs.Config `toml:"storage"`
+	Storage fs.Config `toml:"storage" doc:"Where episodes and feeds are stored: local disk or S3-compatible storage."`
 	// Log is the optional logging configuration
-	Log Log `toml:"log"`
+	Log Log `toml:"log" doc:"Optional log file and rotation. Logs go to stdout when no file is set."`
 	// Database configuration
-	Database db.Config `toml:"database"`
+	Database db.Config `toml:"database" doc:"Metadata database location and tuning."`
 	// Feeds is a list of feeds to host by this app.
 	// ID will be used as feed ID in http://podsync.net/{FEED_ID}.xml
-	Feeds map[string]*feed.Config
+	Feeds map[string]*feed.Config `doc:"Podcast feeds, keyed by feed ID. Each feed is served at <hostname>/<ID>.xml."`
 	// Tokens is API keys to use to access YouTube/Vimeo APIs.
-	Tokens map[model.Provider]StringSlice `toml:"tokens"`
+	Tokens map[model.Provider]StringSlice `toml:"tokens" secret:"true" doc:"API keys per provider (youtube, vimeo, soundcloud, twitch). A list of keys is rotated."`
 	// Downloader (youtube-dl) configuration
-	Downloader ytdl.Config `toml:"downloader"`
+	Downloader ytdl.Config `toml:"downloader" doc:"youtube-dl / yt-dlp settings."`
 	// Signatures configuration for optional audio signature trimming.
-	Signatures SignatureConfig `toml:"signatures"`
+	Signatures SignatureConfig `toml:"signatures" doc:"Location of per-feed signature audio files used by signature_rules."`
 	// Global cleanup policy applied to feeds that don't specify their own cleanup policy
-	Cleanup *feed.Cleanup `toml:"cleanup"`
+	Cleanup *feed.Cleanup `toml:"cleanup" doc:"Default cleanup policy for feeds without their own clean setting."`
 	// Audiobookshelf is the optional hardlink export into an Audiobookshelf podcast library
-	Audiobookshelf audiobookshelf.Config `toml:"audiobookshelf"`
+	Audiobookshelf audiobookshelf.Config `toml:"audiobookshelf" doc:"Hardlink episodes into an Audiobookshelf podcast library."`
+	// Admin configures the authenticated admin interface
+	Admin admin.Config `toml:"admin" doc:"Authenticated admin interface on its own port, for use behind a reverse proxy."`
 }
 
 type SignatureConfig struct {
@@ -208,6 +212,10 @@ func (c *Config) validate() error {
 		result = multierror.Append(result, err)
 	}
 
+	if err := c.validateAdmin(); err != nil {
+		result = multierror.Append(result, err)
+	}
+
 	return result.ErrorOrNil()
 }
 
@@ -286,6 +294,25 @@ func checkSignatureRule(root, feedID string, rule feed.SignatureRule) error {
 	return nil
 }
 
+// validateAdmin checks the admin interface settings, including that it does not share the podcast
+// server's port: the admin listener must stay separate so it can be protected on its own.
+func (c *Config) validateAdmin() error {
+	if !c.Admin.Enabled {
+		return nil
+	}
+	if err := c.Admin.Validate(); err != nil {
+		return err
+	}
+	serverPort := c.Server.Port
+	if serverPort == 0 {
+		serverPort = 8080
+	}
+	if c.Admin.Port == serverPort && c.Storage.Type != "s3" {
+		return errors.Errorf("admin.port %d must differ from server.port; the admin interface needs its own listener", c.Admin.Port)
+	}
+	return nil
+}
+
 func (c *Config) validateAudiobookshelf() error {
 	if !c.Audiobookshelf.Enabled {
 		return nil
@@ -325,6 +352,8 @@ func (c *Config) applyDefaults(configPath string) {
 	if c.Storage.Type == "" {
 		c.Storage.Type = "local"
 	}
+
+	c.Admin.ApplyDefaults()
 
 	// Default local storage next to the config file, like the database directory. The deprecated
 	// server.data_dir still takes precedence (see validate).
@@ -536,6 +565,11 @@ func (c *Config) applyEnv() {
 // StringSlice is a toml extension that lets you to specify either a string
 // value (a slice with just one element) or a string slice.
 type StringSlice []string
+
+// ConfigSchema describes StringSlice for the admin interface: a string or a list of strings.
+func (StringSlice) ConfigSchema() configschema.Schema {
+	return configschema.Schema{Type: []string{"string", "array"}, Items: &configschema.Schema{Type: "string"}}
+}
 
 func (s *StringSlice) UnmarshalTOML(v interface{}) error {
 	// Trees built from YAML/JSON (toml.TreeFromMap) hold typed string lists.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/jessevdk/go-flags"
 	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/audiosig"
+	"github.com/mxpv/podsync/pkg/configschema"
+	"github.com/mxpv/podsync/services/admin"
 	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
 	"github.com/robfig/cron/v3"
@@ -36,6 +39,7 @@ type Opts struct {
 	Init        bool   `long:"init" description:"Write a starter configuration file to the --config path and exit"`
 	// NoConfigWatch disables reloading when the configuration file changes (SIGHUP still reloads).
 	NoConfigWatch bool `long:"no-config-watch" env:"PODSYNC_NO_CONFIG_WATCH" description:"Do not reload the configuration when the file changes (SIGHUP still reloads)"`
+	HashPassword  bool `long:"hash-password" description:"Print a bcrypt hash for admin.password_hash and exit (reads the password from the terminal or stdin)"`
 }
 
 const banner = `
@@ -85,6 +89,13 @@ func main() {
 
 	if !opts.Init {
 		opts.ConfigPath = resolveConfigPath(opts.ConfigPath)
+	}
+
+	if opts.HashPassword {
+		if err := runHashPassword(os.Stdin, os.Stdout, os.Stderr); err != nil {
+			exitWithError(err.Error())
+		}
+		return
 	}
 
 	if opts.Init {
@@ -306,6 +317,34 @@ func main() {
 			log.Info("shutting down web server")
 			if err := srv.Shutdown(ctxShutDown); err != nil {
 				log.WithError(err).Error("server shutdown failed")
+			}
+			return ctx.Err()
+		})
+	}
+
+	// The admin interface has its own listener, so it runs with local and S3 storage alike.
+	if cfg.Admin.Enabled {
+		adminServer, err := admin.New(admin.Options{
+			Config:     cfg.Admin,
+			Runtime:    adminRuntime{reloader: reloader, schedule: schedule},
+			DB:         database,
+			Version:    version,
+			ConfigPath: absPath(opts.ConfigPath),
+			Schema:     configschema.Generate(reflect.TypeOf(Config{})),
+		})
+		if err != nil {
+			log.WithError(err).Fatal("failed to create admin interface")
+		}
+		group.Go(func() error {
+			log.WithFields(log.Fields{"address": adminServer.Addr, "auth": cfg.Admin.Auth}).Info("running admin interface")
+			return adminServer.ListenAndServe()
+		})
+		group.Go(func() error {
+			<-ctx.Done()
+			ctxShutDown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelShutdown()
+			if err := adminServer.Shutdown(ctxShutDown); err != nil {
+				log.WithError(err).Error("admin interface shutdown failed")
 			}
 			return ctx.Err()
 		})

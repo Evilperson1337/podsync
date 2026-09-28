@@ -32,6 +32,13 @@ func (f *fakeCron) AddFunc(spec string, _ func()) (cron.EntryID, error) {
 	return f.next, nil
 }
 
+func (f *fakeCron) Entry(id cron.EntryID) cron.Entry {
+	if _, ok := f.entries[id]; !ok {
+		return cron.Entry{}
+	}
+	return cron.Entry{ID: id, Next: time.Date(2030, 1, 1, 0, 0, 0, int(id), time.UTC)}
+}
+
 func (f *fakeCron) Remove(id cron.EntryID) {
 	delete(f.entries, id)
 	f.removed = append(f.removed, id)
