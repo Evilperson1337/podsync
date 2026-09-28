@@ -32,6 +32,8 @@ type Options struct {
 	Schema *configschema.Schema
 	// Store enables the configuration editor; without it the interface is read-only.
 	Store ConfigStore
+	// Files enables directory and signature file helpers in the editor.
+	Files Files
 }
 
 // Server is the admin HTTP server.
@@ -59,6 +61,9 @@ func New(opts Options) (*Server, error) {
 	mux.HandleFunc("POST /api/feeds/{id}/update", srv.handleUpdateNow)
 	if opts.Store != nil {
 		srv.registerConfigRoutes(mux)
+	}
+	if opts.Files != nil {
+		srv.registerFileRoutes(mux)
 	}
 	mux.Handle("GET /", http.FileServerFS(static))
 

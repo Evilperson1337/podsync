@@ -226,6 +226,8 @@
         state.doc = clone(state.original);
         state.pending = {};
         state.issues = [];
+        lists.absDirs = null;
+        lists.signatures = {};
         document.getElementById("editor-file").textContent = `${state.snapshot.path} (${state.snapshot.format.toUpperCase()})`;
         showRestart(state.snapshot.pending_restart);
         showPreview("");
@@ -289,7 +291,103 @@
     if (k === "map") return collapsible(path, [el("span", { class: "option-name", text: name })], [mapEditor(path, schema)], "subsection");
     if (k === "scalarmap") return collapsible(path, [el("span", { class: "option-name", text: name })], [scalarMapEditor(path, schema)], "subsection");
 
-    return fieldRow(path, name, schema, isSecret(schema) ? secretControl(path, schema) : valueControl(path, schema, k));
+    const control = isSecret(schema) ? secretControl(path, schema) : valueControl(path, schema, k);
+    enhance(path, control);
+    return fieldRow(path, name, schema, control);
+  }
+
+  // ----- helpers for options that name files and folders -----
+
+  const lists = { absDirs: null, signatures: {} };
+
+  function fetchList(key, url) {
+    if (!lists[key]) lists[key] = api(url).catch((err) => ({ error: err.message }));
+    return lists[key];
+  }
+
+  function fetchSignatures(feedID) {
+    if (!lists.signatures[feedID]) {
+      lists.signatures[feedID] = api(`api/feeds/${encodeURIComponent(feedID)}/signatures`).catch((err) => ({ error: err.message }));
+    }
+    return lists.signatures[feedID];
+  }
+
+  function attachSuggestions(input, note, promise, values, describe) {
+    const listId = "dl-" + Math.random().toString(36).slice(2);
+    const datalist = el("datalist", { id: listId });
+    input.setAttribute("list", listId);
+    input.after(datalist);
+    promise.then((result) => {
+      if (result.error) {
+        note.textContent = result.error.replace(/^\d+ [^:]*: /, "");
+        return;
+      }
+      datalist.replaceChildren(...values(result).map((value) => el("option", { value })));
+      note.textContent = describe(result);
+    });
+  }
+
+  function enhance(path, control) {
+    const input = control.querySelector && control.querySelector("input[type=text]");
+    if (!input) return;
+    const [section, feedID, option, index, leaf] = path;
+    if (section !== "feeds") return;
+
+    if (path.length === 4 && option === "audiobookshelf" && index === "directory") {
+      const note = el("div", { class: "field-help" });
+      control.append(note);
+      attachSuggestions(input, note, fetchList("absDirs", "api/audiobookshelf/directories"),
+        (r) => r.directories,
+        (r) => r.directories.length ? `${r.directories.length} podcast folders under ${r.root}.` : `No folders under ${r.root} yet.`);
+      return;
+    }
+
+    if (path.length === 5 && option === "signature_rules" && leaf === "file") {
+      const note = el("div", { class: "field-help" });
+      const picker = el("input", { type: "file", accept: "audio/*,.wav,.mp3,.m4a,.flac,.ogg,.opus,.aac", hidden: "" });
+      const upload = button("Upload…", () => picker.click());
+      picker.addEventListener("change", async () => {
+        const file = picker.files && picker.files[0];
+        if (!file) return;
+        note.textContent = `Uploading ${file.name}…`;
+        let response = await uploadSignature(feedID, file, false);
+        if (response.status === 409 && confirm(`${file.name} already exists for ${feedID}. Replace it?`)) {
+          response = await uploadSignature(feedID, file, true);
+        }
+        picker.value = "";
+        if (!response.ok) {
+          note.textContent = "Upload failed: " + ((response.data && response.data.error) || `HTTP ${response.status}`);
+          return;
+        }
+        delete lists.signatures[feedID];
+        setAt(path, response.data.name);
+        input.value = response.data.name;
+        note.textContent = `Uploaded ${response.data.name}.`;
+      });
+      control.append(el("div", { class: "add-row" }, [upload, picker]), note);
+      attachSuggestions(input, note, fetchSignatures(feedID),
+        (r) => r.files.map((f) => f.name),
+        (r) => r.files.length ? `${r.files.length} signature files in ${r.directory}.` : `No signature files yet; upload one or place files in ${r.directory}.`);
+    }
+  }
+
+  async function uploadSignature(feedID, file, replace) {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    if (replace) form.append("replace", "true");
+    const response = await fetch(`api/feeds/${encodeURIComponent(feedID)}/signatures`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json", "X-Podsync-Admin": "1" },
+      body: form,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (err) {
+      data = null;
+    }
+    return { ok: response.ok, status: response.status, data };
   }
 
   // fieldRow lays out a label, control and help. Options set by an environment variable are shown

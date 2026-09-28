@@ -335,6 +335,7 @@ func main() {
 			ConfigPath: absPath(opts.ConfigPath),
 			Schema:     schema,
 			Store:      newFileConfigStore(opts.ConfigPath, schema, reloader, validateRuntime),
+			Files:      configFiles{reloader: reloader, probe: probeAudioFile},
 		})
 		if err != nil {
 			log.WithError(err).Fatal("failed to create admin interface")
