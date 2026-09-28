@@ -199,7 +199,7 @@ func TestRequireSameOrigin(t *testing.T) {
 
 func TestUIAndSecurityHeaders(t *testing.T) {
 	srv, _ := newTestServer(t, proxyConfig(), nil)
-	for _, path := range []string{"/", "/app.js", "/app.css"} {
+	for _, path := range []string{"/", "/app.js", "/app.css", "/editor.js"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.RemoteAddr = "10.0.0.2:1"
 		req.Header.Set("Remote-User", "alice")

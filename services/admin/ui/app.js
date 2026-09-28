@@ -28,6 +28,30 @@ async function api(path) {
   return response.json();
 }
 
+// apiSend makes a state-changing request. It always resolves with { ok, status, data } so callers
+// can handle validation errors (422) and conflicts (409) themselves.
+async function apiSend(method, path, body) {
+  const response = await fetch(path, {
+    method,
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", Accept: "application/json", "X-Podsync-Admin": "1" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = null;
+  const text = await response.text();
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (err) {
+    data = { error: text.trim() || response.statusText };
+  }
+  return { ok: response.ok, status: response.status, data };
+}
+
+function formatBytes(size) {
+  if (size < 1024) return `${size} B`;
+  return `${(size / 1024).toFixed(1)} KB`;
+}
+
 function relative(iso) {
   if (!iso) return "";
   const diff = (new Date(iso).getTime() - Date.now()) / 1000;
@@ -220,12 +244,17 @@ function showView(name) {
   for (const tab of document.querySelectorAll(".tab")) tab.setAttribute("aria-selected", String(tab.dataset.view === name));
   for (const view of document.querySelectorAll(".view")) view.hidden = view.id !== `view-${name}`;
   if (name === "settings") loadSchema();
+  if (name === "config" && window.PodsyncEditor) window.PodsyncEditor.show();
+  if (name === "history" && window.PodsyncEditor) window.PodsyncEditor.showHistory();
 }
 
 async function loadIdentity() {
   try {
     const me = await api("api/me");
     document.getElementById("who").textContent = `${me.user} · ${me.auth_mode} auth · ${me.version}`;
+    // With the editor available, it replaces the read-only settings reference.
+    for (const tab of document.querySelectorAll("[data-requires-editor]")) tab.hidden = !me.editable;
+    for (const tab of document.querySelectorAll("[data-read-only]")) tab.hidden = me.editable;
   } catch (err) {
     document.getElementById("who").textContent = "";
   }
