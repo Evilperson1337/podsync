@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Podsync Admin</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+  <script src="editor.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Podsync <span class="muted">admin</span></div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" role="tab" data-view="feeds" aria-selected="true">Feeds</button>
+      <button class="tab" role="tab" data-view="config" aria-selected="false" data-requires-editor hidden>Configuration</button>
+      <button class="tab" role="tab" data-view="history" aria-selected="false" data-requires-editor hidden>History</button>
+      <button class="tab" role="tab" data-view="settings" aria-selected="false" data-read-only>Settings reference</button>
+    </nav>
+    <div class="who" id="who"></div>
+  </header>
+
+  <main>
+    <section id="view-feeds" class="view">
+      <div class="toolbar">
+        <div class="stats" id="stats"></div>
+        <div class="toolbar-right">
+          <span class="muted small" id="updated"></span>
+          <button class="button" id="refresh" type="button">Refresh</button>
+        </div>
+      </div>
+      <div id="feeds-error" class="notice error" hidden></div>
+      <div id="feeds-empty" class="notice" hidden>
+        No feeds are configured. Add <code>[feeds.&lt;id&gt;]</code> sections to <code id="config-path">the configuration file</code>;
+        Podsync picks up the change automatically.
+      </div>
+      <div class="table-wrap">
+        <table class="feeds" id="feeds" hidden>
+          <thead>
+            <tr>
+              <th>Feed</th>
+              <th>Schedule</th>
+              <th>Last run</th>
+              <th>Episodes</th>
+              <th>Audiobookshelf</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-config" class="view" hidden>
+      <div class="editor-bar" id="editor-bar">
+        <div class="editor-status">
+          <span id="editor-state" class="muted">Loading…</span>
+          <span id="editor-file" class="muted small"></span>
+        </div>
+        <div class="editor-actions">
+          <button class="button" id="editor-discard" type="button" disabled>Discard changes</button>
+          <button class="button" id="editor-validate" type="button">Check</button>
+          <button class="button primary" id="editor-save" type="button" disabled>Save</button>
+        </div>
+      </div>
+      <div id="editor-restart" class="notice warn" hidden></div>
+      <div id="editor-messages"></div>
+      <div id="editor-form"></div>
+      <details id="editor-preview-wrap" class="section" hidden>
+        <summary>Preview of the file that will be written</summary>
+        <pre id="editor-preview" class="preview"></pre>
+      </details>
+    </section>
+
+    <section id="view-history" class="view" hidden>
+      <p class="muted">
+        Every save keeps the previous configuration file. Restoring a version writes it back exactly as it was,
+        including any comments, and applies it immediately.
+      </p>
+      <div id="history-messages"></div>
+      <div class="table-wrap">
+        <table class="feeds" id="history">
+          <thead><tr><th>Saved version</th><th>Size</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <p class="muted">
+        Every configuration option, generated from Podsync itself. Change the configuration file and Podsync
+        reloads it automatically.
+      </p>
+      <div id="settings"></div>
+    </section>
+  </main>
+</body>
+</html>

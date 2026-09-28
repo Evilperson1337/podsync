@@ -32,6 +32,13 @@ func (f *fakeCron) AddFunc(spec string, _ func()) (cron.EntryID, error) {
 	return f.next, nil
 }
 
+func (f *fakeCron) Entry(id cron.EntryID) cron.Entry {
+	if _, ok := f.entries[id]; !ok {
+		return cron.Entry{}
+	}
+	return cron.Entry{ID: id, Next: time.Date(2030, 1, 1, 0, 0, 0, int(id), time.UTC)}
+}
+
 func (f *fakeCron) Remove(id cron.EntryID) {
 	delete(f.entries, id)
 	f.removed = append(f.removed, id)
@@ -184,7 +191,8 @@ youtube = "new-key"
   [feeds.second]
   url = "https://rumble.com/c/second"
 `), 0644))
-	require.NoError(t, reloader.Reload("test"))
+	_, err := reloader.Reload("test")
+	require.NoError(t, err)
 
 	assert.Equal(t, 2, reloader.FeedCount())
 	assert.Len(t, updater.feeds, 2)
@@ -200,7 +208,7 @@ func TestConfigReloaderKeepsRunningConfigOnError(t *testing.T) {
 	before := reloader.current
 
 	require.NoError(t, os.WriteFile(path, []byte(reloadBaseConfig+"\n  pagesiz = 3\n"), 0644))
-	err := reloader.Reload("test")
+	_, err := reloader.Reload("test")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pagesiz")
 	assert.Same(t, before, reloader.current)
@@ -208,14 +216,16 @@ func TestConfigReloaderKeepsRunningConfigOnError(t *testing.T) {
 
 	reloader.validate = func(*Config) error { return assert.AnError }
 	require.NoError(t, os.WriteFile(path, []byte(reloadBaseConfig), 0644))
-	require.Error(t, reloader.Reload("test"), "failed runtime validation also keeps the running configuration")
+	_, err = reloader.Reload("test")
+	require.Error(t, err, "failed runtime validation also keeps the running configuration")
 	assert.Zero(t, updater.calls)
 }
 
 func TestConfigReloaderRemovesAllFeeds(t *testing.T) {
 	reloader, updater, _, path := newTestReloader(t, reloadBaseConfig)
 	require.NoError(t, os.WriteFile(path, []byte("[server]\nport = 8080\n"), 0644))
-	require.NoError(t, reloader.Reload("test"))
+	_, err := reloader.Reload("test")
+	require.NoError(t, err)
 	assert.Equal(t, 0, reloader.FeedCount())
 	assert.Empty(t, updater.feeds)
 }

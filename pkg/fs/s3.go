@@ -24,13 +24,13 @@ import (
 // S3Config is the configuration for a S3-compatible storage provider
 type S3Config struct {
 	// S3 Bucket to store files
-	Bucket string `toml:"bucket"`
+	Bucket string `toml:"bucket" doc:"Bucket name."`
 	// Region of the S3 service
-	Region string `toml:"region"`
+	Region string `toml:"region" doc:"Bucket region, e.g. \"us-east-1\"."`
 	// EndpointURL is an HTTP endpoint of the S3 API
-	EndpointURL string `toml:"endpoint_url"`
+	EndpointURL string `toml:"endpoint_url" doc:"S3 API endpoint, e.g. \"https://s3.us-west-2.amazonaws.com\"."`
 	// Prefix is a prefix (subfolder) to use to build key names
-	Prefix string `toml:"prefix"`
+	Prefix string `toml:"prefix" doc:"Optional key prefix inside the bucket. You may need to add it to server.hostname too."`
 }
 
 // S3 implements file storage for S3-compatible providers.

@@ -59,6 +59,7 @@ brew install yt-dlp ffmpeg go
 - [Runtime architecture](./docs/runtime_architecture.md)
 - [Observability and operations](./docs/observability.md)
 - [Audiobookshelf hardlink export](./docs/audiobookshelf.md)
+- [Admin interface](./docs/admin.md)
 
 ## 🌙 Nightly builds
 
@@ -191,6 +192,19 @@ directory = "Doctrine"
 ```
 
 The Audiobookshelf directory mirrors Podsync in both directions: episodes removed by Podsync cleanup (or deleted from Podsync storage) are removed from Audiobookshelf, and episodes deleted in Audiobookshelf are removed from Podsync. Podsync only deletes files it can verify are its own hardlinks. See [Audiobookshelf hardlink export](./docs/audiobookshelf.md) for Docker/Unraid mappings and validation steps.
+
+### Admin interface
+
+An optional, authenticated admin interface runs on its own port (default 8081), separate from the public podcast server. It shows each feed's schedule, last run, errors, episode counts and Audiobookshelf export, and edits every configuration option: changes are validated, saved to the configuration file (with the previous version kept for one-click restore) and applied immediately. Secrets are write-only, and hand edits are detected rather than overwritten. It is designed to sit behind an authenticating reverse proxy such as SWAG with Authelia, Authentik or Keycloak (via oauth2-proxy), with a password mode as a fallback:
+
+```toml
+[admin]
+enabled = true
+auth = "proxy"
+trusted_proxies = ["172.18.0.10"]   # your reverse proxy
+```
+
+Do not publish the admin port directly. See [Admin interface](./docs/admin.md) for SWAG examples and security notes.
 
 ### Reloading the configuration
 

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
+	"github.com/mxpv/podsync/pkg/configschema"
 )
 
 // Signature trim actions.
@@ -29,20 +31,20 @@ func ValidSignatureActions() []string {
 // or, as a fallback, in <signatures_root>/<feed_id>/signatures/rules.json.
 type SignatureRule struct {
 	// File is the signature audio file, relative to <signatures_root>/<feed_id>/signatures/ or absolute.
-	File string `toml:"file" json:"file"`
+	File string `toml:"file" json:"file" doc:"Signature audio file, relative to <signatures root>/<feed ID>/signatures/ or absolute."`
 	// Action is one of cut_before, cut_after, remove_segment.
-	Action string `toml:"action" json:"action"`
+	Action string `toml:"action" json:"action" enum:"cut_before,cut_after,remove_segment" doc:"\"cut_before\" removes everything before the signature end, \"cut_after\" everything after its start, \"remove_segment\" the signature itself."`
 	// PreSeconds is padding before signature_start.
-	PreSeconds Number `toml:"pre" json:"pre"`
+	PreSeconds Number `toml:"pre" json:"pre" doc:"Seconds of padding before the signature start."`
 	// PostSeconds is padding after signature_end.
-	PostSeconds Number `toml:"post" json:"post"`
+	PostSeconds Number `toml:"post" json:"post" doc:"Seconds of padding after the signature end."`
 	// MaxMatches is how many occurrences of the signature to act on. Values below 2 use only the
 	// strongest match; higher values find repeated occurrences (e.g. a stinger before every ad break).
-	MaxMatches int `toml:"max_matches" json:"max_matches,omitempty"`
+	MaxMatches int `toml:"max_matches" json:"max_matches,omitempty" doc:"Number of occurrences to act on (default 1). Raise it for signatures that repeat, such as ad break stingers."`
 	// MinScore overrides the minimum confidence score (0-1) for this rule; 0 keeps the default.
-	MinScore Number `toml:"min_score" json:"min_score,omitempty"`
+	MinScore Number `toml:"min_score" json:"min_score,omitempty" doc:"Minimum confidence score, 0-1 (default 0.6)."`
 	// MinPeakRatio overrides the minimum best/runner-up peak ratio for this rule; 0 keeps the default.
-	MinPeakRatio Number `toml:"min_peak_ratio" json:"min_peak_ratio,omitempty"`
+	MinPeakRatio Number `toml:"min_peak_ratio" json:"min_peak_ratio,omitempty" doc:"How much the best match must stand out from nearby matches (default 1.2)."`
 }
 
 // Number is a float64 configuration value that also accepts TOML integers, so both
@@ -62,6 +64,11 @@ func (n *Number) UnmarshalTOML(value interface{}) error {
 	return nil
 }
 
+// ConfigSchema describes Number for the admin interface.
+func (Number) ConfigSchema() configschema.Schema {
+	return configschema.Schema{Type: "number"}
+}
+
 // Seconds converts a number of seconds to a time.Duration.
 func (n Number) Seconds() time.Duration {
 	return time.Duration(float64(n) * float64(time.Second))
@@ -77,23 +84,27 @@ func (r SignatureRule) MaxMatchCount() int {
 
 // Validate checks the rule's fields. It does not check that the signature file exists.
 func (r SignatureRule) Validate() error {
+	at := configschema.NewFieldError
 	if strings.TrimSpace(r.File) == "" {
-		return errors.New("file is required")
+		return at(errors.New("file is required"), "file")
 	}
 	if !slices.Contains(ValidSignatureActions(), r.Action) {
-		return errors.Errorf("action %q must be one of %s", r.Action, strings.Join(ValidSignatureActions(), ", "))
+		return at(errors.Errorf("action %q must be one of %s", r.Action, strings.Join(ValidSignatureActions(), ", ")), "action")
 	}
-	if r.PreSeconds < 0 || r.PostSeconds < 0 {
-		return errors.New("pre and post must not be negative")
+	if r.PreSeconds < 0 {
+		return at(errors.New("pre must not be negative"), "pre")
+	}
+	if r.PostSeconds < 0 {
+		return at(errors.New("post must not be negative"), "post")
 	}
 	if r.MaxMatches < 0 {
-		return errors.New("max_matches must not be negative")
+		return at(errors.New("max_matches must not be negative"), "max_matches")
 	}
 	if r.MinScore < 0 || r.MinScore > 1 {
-		return errors.Errorf("min_score %g must be between 0 and 1", r.MinScore)
+		return at(errors.Errorf("min_score %g must be between 0 and 1", r.MinScore), "min_score")
 	}
 	if r.MinPeakRatio < 0 {
-		return errors.Errorf("min_peak_ratio %g must not be negative", r.MinPeakRatio)
+		return at(errors.Errorf("min_peak_ratio %g must not be negative", r.MinPeakRatio), "min_peak_ratio")
 	}
 	return nil
 }

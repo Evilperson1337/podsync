@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
@@ -17,56 +18,60 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/mxpv/podsync/pkg/audiobookshelf"
+	"github.com/mxpv/podsync/pkg/configschema"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/fs"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/pkg/ytdl"
+	"github.com/mxpv/podsync/services/admin"
 	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
 )
 
 type Config struct {
 	// Server is the web server configuration
-	Server web.Config `toml:"server"`
+	Server web.Config `toml:"server" doc:"Podcast web server: port, public hostname and TLS."`
 	// S3 is the optional configuration for S3-compatible storage provider
-	Storage fs.Config `toml:"storage"`
+	Storage fs.Config `toml:"storage" doc:"Where episodes and feeds are stored: local disk or S3-compatible storage."`
 	// Log is the optional logging configuration
-	Log Log `toml:"log"`
+	Log Log `toml:"log" doc:"Optional log file and rotation. Logs go to stdout when no file is set."`
 	// Database configuration
-	Database db.Config `toml:"database"`
+	Database db.Config `toml:"database" doc:"Metadata database location and tuning."`
 	// Feeds is a list of feeds to host by this app.
 	// ID will be used as feed ID in http://podsync.net/{FEED_ID}.xml
-	Feeds map[string]*feed.Config
+	Feeds map[string]*feed.Config `doc:"Podcast feeds, keyed by feed ID. Each feed is served at <hostname>/<ID>.xml."`
 	// Tokens is API keys to use to access YouTube/Vimeo APIs.
-	Tokens map[model.Provider]StringSlice `toml:"tokens"`
+	Tokens map[model.Provider]StringSlice `toml:"tokens" secret:"true" doc:"API keys per provider (youtube, vimeo, soundcloud, twitch). A list of keys is rotated."`
 	// Downloader (youtube-dl) configuration
-	Downloader ytdl.Config `toml:"downloader"`
+	Downloader ytdl.Config `toml:"downloader" doc:"youtube-dl / yt-dlp settings."`
 	// Signatures configuration for optional audio signature trimming.
-	Signatures SignatureConfig `toml:"signatures"`
+	Signatures SignatureConfig `toml:"signatures" doc:"Location of per-feed signature audio files used by signature_rules."`
 	// Global cleanup policy applied to feeds that don't specify their own cleanup policy
-	Cleanup *feed.Cleanup `toml:"cleanup"`
+	Cleanup *feed.Cleanup `toml:"cleanup" doc:"Default cleanup policy for feeds without their own clean setting."`
 	// Audiobookshelf is the optional hardlink export into an Audiobookshelf podcast library
-	Audiobookshelf audiobookshelf.Config `toml:"audiobookshelf"`
+	Audiobookshelf audiobookshelf.Config `toml:"audiobookshelf" doc:"Hardlink episodes into an Audiobookshelf podcast library."`
+	// Admin configures the authenticated admin interface
+	Admin admin.Config `toml:"admin" doc:"Authenticated admin interface on its own port, for use behind a reverse proxy."`
 }
 
 type SignatureConfig struct {
-	RootDir string `toml:"root_dir"`
+	RootDir string `toml:"root_dir" doc:"Directory with per-feed signature folders (<root_dir>/<feed ID>/signatures). Defaults to the local data directory."`
 }
 
 type Log struct {
 	// Filename to write the log to (instead of stdout)
-	Filename string `toml:"filename"`
+	Filename string `toml:"filename" doc:"Write logs to this file instead of stdout."`
 	// MaxSize is the maximum size of the log file in MB
-	MaxSize int `toml:"max_size"`
+	MaxSize int `toml:"max_size" doc:"Maximum log file size in MB before rotation (default 50)."`
 	// MaxBackups is the maximum number of log file backups to keep after rotation
-	MaxBackups int `toml:"max_backups"`
+	MaxBackups int `toml:"max_backups" doc:"Number of rotated log files to keep (default 7)."`
 	// MaxAge is the maximum number of days to keep the logs for
-	MaxAge int `toml:"max_age"`
+	MaxAge int `toml:"max_age" doc:"Days to keep rotated log files (default 30)."`
 	// Compress old backups
-	Compress bool `toml:"compress"`
+	Compress bool `toml:"compress" doc:"Compress rotated log files."`
 	// Debug mode
-	Debug bool `toml:"debug"`
+	Debug bool `toml:"debug" doc:"Enable debug logging."`
 }
 
 // ErrConfigNotFound is returned by LoadConfig when the configuration file does not exist.
@@ -82,7 +87,13 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		return nil, errors.Wrapf(err, "failed to read config file: %s", path)
 	}
+	return loadConfigData(path, data)
+}
 
+// loadConfigData loads configuration content as if it were the file at path: path picks the
+// format and anchors path-relative defaults. It lets candidate configurations be validated
+// without writing them.
+func loadConfigData(path string, data []byte) (*Config, error) {
 	format := configFormatFor(path)
 	tree, err := parseConfigTree(format, data)
 	if err != nil {
@@ -96,11 +107,13 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, errors.Wrapf(err, "failed to decode %s", path)
 	}
 	if unknown := findUnknownConfigKeys(tree, reflect.TypeOf(config)); len(unknown) > 0 {
-		keys := make([]string, 0, len(unknown))
+		var result *multierror.Error
 		for _, key := range unknown {
-			keys = append(keys, key.String())
+			result = multierror.Append(result, configschema.NewFieldError(
+				errors.Errorf("unknown configuration key %s in %s; check for typos or misplaced sections", key.String(), path),
+				key.Segments...))
 		}
-		return nil, errors.Errorf("unknown configuration keys in %s (check for typos or misplaced sections): %s", path, strings.Join(keys, ", "))
+		return nil, result
 	}
 
 	for id, f := range config.Feeds {
@@ -136,36 +149,36 @@ func (c *Config) validate() error {
 	if c.Server.Path != "" {
 		var pathReg = regexp.MustCompile(model.PathRegex)
 		if !pathReg.MatchString(c.Server.Path) {
-			result = multierror.Append(result, errors.Errorf("Server handle path must be match %s or empty", model.PathRegex))
+			result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("Server handle path must be match %s or empty", model.PathRegex), "server", "path"))
 		}
 	}
 
 	switch c.Storage.Type {
 	case "local":
 		if c.Storage.Local.DataDir == "" {
-			result = multierror.Append(result, errors.New("data directory is required for local storage"))
+			result = multierror.Append(result, configschema.NewFieldError(errors.New("data directory is required for local storage"), "storage", "local", "data_dir"))
 		}
 	case "s3":
 		if c.Storage.S3.EndpointURL == "" || c.Storage.S3.Region == "" || c.Storage.S3.Bucket == "" {
-			result = multierror.Append(result, errors.New("S3 storage requires endpoint_url, region and bucket to be set"))
+			result = multierror.Append(result, configschema.NewFieldError(errors.New("S3 storage requires endpoint_url, region and bucket to be set"), "storage", "s3"))
 		}
 		if strings.Contains(c.Server.Hostname, "localhost") || strings.Contains(c.Server.Hostname, "127.0.0.1") {
-			result = multierror.Append(result, errors.New("server.hostname must be externally reachable when using S3 storage"))
+			result = multierror.Append(result, configschema.NewFieldError(errors.New("server.hostname must be externally reachable when using S3 storage"), "server", "hostname"))
 		}
 	default:
-		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("unknown storage type: %s", c.Storage.Type), "storage", "type"))
 	}
 
 	for id, f := range c.Feeds {
 		mergeFeedCustom(f)
 
 		if f.URL == "" {
-			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
+			result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("URL is required for %q", id), "feeds", id, "url"))
 		}
 
 		if f.CronSchedule != "" {
 			if _, err := cron.ParseStandard(f.CronSchedule); err != nil {
-				result = multierror.Append(result, errors.Wrapf(err, "invalid cron_schedule %q for %q", f.CronSchedule, id))
+				result = multierror.Append(result, configschema.NewFieldError(errors.Wrapf(err, "invalid cron_schedule %q for %q", f.CronSchedule, id), "feeds", id, "cron_schedule"))
 			}
 		}
 
@@ -182,12 +195,12 @@ func (c *Config) validate() error {
 		if rssURL := strings.TrimSpace(f.Custom.RSSMetadataURL); rssURL != "" {
 			parsed, err := url.ParseRequestURI(rssURL)
 			if err != nil {
-				result = multierror.Append(result, errors.Wrapf(err, "invalid rss_metadata_url for %q", id))
+				result = multierror.Append(result, configschema.NewFieldError(errors.Wrapf(err, "invalid rss_metadata_url for %q", id), "feeds", id, "custom", "rss_metadata_url"))
 				continue
 			}
 
 			if parsed.Scheme != "http" && parsed.Scheme != "https" {
-				result = multierror.Append(result, errors.Errorf("rss_metadata_url for %q must use http or https", id))
+				result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("rss_metadata_url for %q must use http or https", id), "feeds", id, "custom", "rss_metadata_url"))
 			}
 		}
 
@@ -205,6 +218,10 @@ func (c *Config) validate() error {
 	}
 
 	if err := c.validateAudiobookshelf(); err != nil {
+		result = multierror.Append(result, err)
+	}
+
+	if err := c.validateAdmin(); err != nil {
 		result = multierror.Append(result, err)
 	}
 
@@ -245,7 +262,11 @@ func (c *Config) validateSignatureRules(feedID string, f *feed.Config) error {
 	var result *multierror.Error
 	for idx, rule := range f.SignatureRules {
 		if err := checkSignatureRule(root, feedID, rule); err != nil {
-			result = multierror.Append(result, errors.Wrapf(err, "signature_rules[%d] for %q", idx, feedID))
+			path := []string{"feeds", feedID, "signature_rules", strconv.Itoa(idx)}
+			if fieldPath := configschema.ErrorPath(err); fieldPath != nil {
+				path = append(path, fieldPath...)
+			}
+			result = multierror.Append(result, configschema.NewFieldError(errors.Wrapf(err, "signature_rules[%d] for %q", idx, feedID), path...))
 		}
 	}
 	return result.ErrorOrNil()
@@ -274,14 +295,33 @@ func checkSignatureRule(root, feedID string, rule feed.SignatureRule) error {
 	}
 	path := update.SignatureFilePath(root, feedID, rule.File)
 	if path == "" {
-		return errors.Errorf("relative file %q needs [signatures] root_dir (or an absolute path) when not using local storage", rule.File)
+		return configschema.NewFieldError(errors.Errorf("relative file %q needs [signatures] root_dir (or an absolute path) when not using local storage", rule.File), "file")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return errors.Wrapf(err, "signature file %q is not accessible", path)
+		return configschema.NewFieldError(errors.Wrapf(err, "signature file %q is not accessible", path), "file")
 	}
 	if info.IsDir() || info.Size() == 0 {
-		return errors.Errorf("signature file %q is empty or not a file", path)
+		return configschema.NewFieldError(errors.Errorf("signature file %q is empty or not a file", path), "file")
+	}
+	return nil
+}
+
+// validateAdmin checks the admin interface settings, including that it does not share the podcast
+// server's port: the admin listener must stay separate so it can be protected on its own.
+func (c *Config) validateAdmin() error {
+	if !c.Admin.Enabled {
+		return nil
+	}
+	if err := c.Admin.Validate(); err != nil {
+		return err
+	}
+	serverPort := c.Server.Port
+	if serverPort == 0 {
+		serverPort = 8080
+	}
+	if c.Admin.Port == serverPort && c.Storage.Type != "s3" {
+		return configschema.NewFieldError(errors.Errorf("admin.port %d must differ from server.port; the admin interface needs its own listener", c.Admin.Port), "admin", "port")
 	}
 	return nil
 }
@@ -292,10 +332,10 @@ func (c *Config) validateAudiobookshelf() error {
 	}
 	var result *multierror.Error
 	if strings.TrimSpace(c.Audiobookshelf.PodcastRoot) == "" {
-		result = multierror.Append(result, errors.New("audiobookshelf.podcast_root is required when audiobookshelf export is enabled"))
+		result = multierror.Append(result, configschema.NewFieldError(errors.New("audiobookshelf.podcast_root is required when audiobookshelf export is enabled"), "audiobookshelf", "podcast_root"))
 	}
 	if c.Storage.Type != "local" {
-		result = multierror.Append(result, errors.Errorf("audiobookshelf export requires local storage (hardlinks cannot be created from %q storage)", c.Storage.Type))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("audiobookshelf export requires local storage (hardlinks cannot be created from %q storage)", c.Storage.Type), "audiobookshelf", "enabled"))
 	}
 	return result.ErrorOrNil()
 }
@@ -305,7 +345,7 @@ func validateFeedAudiobookshelf(feedID string, cfg audiobookshelf.FeedConfig, gl
 		return nil
 	}
 	if err := audiobookshelf.ValidateDirectory(cfg.Directory); err != nil {
-		return errors.Wrapf(err, "invalid audiobookshelf.directory for %q", feedID)
+		return configschema.NewFieldError(errors.Wrapf(err, "invalid audiobookshelf.directory for %q", feedID), "feeds", feedID, "audiobookshelf", "directory")
 	}
 	if !globalEnabled {
 		log.Warnf("audiobookshelf export is enabled for feed %q but disabled globally; set [audiobookshelf] enabled = true to export", feedID)
@@ -325,6 +365,8 @@ func (c *Config) applyDefaults(configPath string) {
 	if c.Storage.Type == "" {
 		c.Storage.Type = "local"
 	}
+
+	c.Admin.ApplyDefaults()
 
 	// Default local storage next to the config file, like the database directory. The deprecated
 	// server.data_dir still takes precedence (see validate).
@@ -464,7 +506,7 @@ func isCustomZero(cfg feed.Custom) bool {
 func validateSponsorBlockConfig(feedID string, cfg feed.SponsorBlock) error {
 	for _, category := range cfg.Categories {
 		if !slices.Contains(feed.ValidSponsorBlockCategories(), category) {
-			return errors.Errorf("invalid sponsorblock category %q for %q", category, feedID)
+			return configschema.NewFieldError(errors.Errorf("invalid sponsorblock category %q for %q", category, feedID), "feeds", feedID, "custom", "sponsorblock", "categories")
 		}
 	}
 	return nil
@@ -476,46 +518,52 @@ func validateCustomFormat(feedID string, cfg *feed.Config) error {
 	}
 	var result *multierror.Error
 	if strings.TrimSpace(cfg.CustomFormat.Extension) == "" {
-		result = multierror.Append(result, errors.Errorf("custom_format.extension is required for %q when format=custom", feedID))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("custom_format.extension is required for %q when format=custom", feedID), "feeds", feedID, "custom_format", "extension"))
 	}
 	if strings.TrimSpace(cfg.CustomFormat.YouTubeDLFormat) == "" {
-		result = multierror.Append(result, errors.Errorf("custom_format.youtube_dl_format is required for %q when format=custom", feedID))
+		result = multierror.Append(result, configschema.NewFieldError(errors.Errorf("custom_format.youtube_dl_format is required for %q when format=custom", feedID), "feeds", feedID, "custom_format", "youtube_dl_format"))
 	}
 	return result.ErrorOrNil()
 }
 
 func validateHooks(feedID string, hooks []*feed.ExecHook, field string) error {
 	for idx, hook := range hooks {
+		at := func(err error, key ...string) error {
+			return configschema.NewFieldError(err, append([]string{"feeds", feedID, field, strconv.Itoa(idx)}, key...)...)
+		}
 		if hook == nil {
-			return errors.Errorf("%s[%d] for %q cannot be nil", field, idx, feedID)
+			return at(errors.Errorf("%s[%d] for %q cannot be nil", field, idx, feedID))
 		}
 		if len(hook.Command) == 0 {
-			return errors.Errorf("%s[%d] for %q must define command", field, idx, feedID)
+			return at(errors.Errorf("%s[%d] for %q must define command", field, idx, feedID), "command")
 		}
 		if hook.Timeout < 0 {
-			return errors.Errorf("%s[%d] for %q timeout must be non-negative", field, idx, feedID)
+			return at(errors.Errorf("%s[%d] for %q timeout must be non-negative", field, idx, feedID), "timeout")
 		}
 		switch strings.ToLower(strings.TrimSpace(hook.Shell)) {
 		case "", "none", "cmd", "powershell", "pwsh":
 		case "sh":
 			if runtime.GOOS == "windows" {
-				return errors.Errorf("%s[%d] for %q cannot use shell=sh on Windows", field, idx, feedID)
+				return at(errors.Errorf("%s[%d] for %q cannot use shell=sh on Windows", field, idx, feedID), "shell")
 			}
 		default:
-			return errors.Errorf("%s[%d] for %q uses unsupported shell %q", field, idx, feedID, hook.Shell)
+			return at(errors.Errorf("%s[%d] for %q uses unsupported shell %q", field, idx, feedID, hook.Shell), "shell")
 		}
 	}
 	return nil
 }
 
+// legacyAPIKeyEnv maps providers to the environment variables that replace their API tokens.
+var legacyAPIKeyEnv = map[model.Provider]string{
+	model.ProviderYoutube:    "PODSYNC_YOUTUBE_API_KEY",
+	model.ProviderVimeo:      "PODSYNC_VIMEO_API_KEY",
+	model.ProviderSoundcloud: "PODSYNC_SOUNDCLOUD_API_KEY",
+	model.ProviderTwitch:     "PODSYNC_TWITCH_API_KEY",
+	model.ProviderRumble:     "PODSYNC_RUMBLE_API_KEY",
+}
+
 func (c *Config) applyEnv() {
-	envVars := map[model.Provider]string{
-		model.ProviderYoutube:    "PODSYNC_YOUTUBE_API_KEY",
-		model.ProviderVimeo:      "PODSYNC_VIMEO_API_KEY",
-		model.ProviderSoundcloud: "PODSYNC_SOUNDCLOUD_API_KEY",
-		model.ProviderTwitch:     "PODSYNC_TWITCH_API_KEY",
-		model.ProviderRumble:     "PODSYNC_RUMBLE_API_KEY",
-	}
+	envVars := legacyAPIKeyEnv
 
 	// Replace API keys from config with environment variables
 	for provider, envVar := range envVars {
@@ -536,6 +584,11 @@ func (c *Config) applyEnv() {
 // StringSlice is a toml extension that lets you to specify either a string
 // value (a slice with just one element) or a string slice.
 type StringSlice []string
+
+// ConfigSchema describes StringSlice for the admin interface: a string or a list of strings.
+func (StringSlice) ConfigSchema() configschema.Schema {
+	return configschema.Schema{Type: []string{"string", "array"}, Items: &configschema.Schema{Type: "string"}}
+}
 
 func (s *StringSlice) UnmarshalTOML(v interface{}) error {
 	// Trees built from YAML/JSON (toml.TreeFromMap) hold typed string lists.

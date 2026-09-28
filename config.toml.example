@@ -203,6 +203,23 @@ podcast_root = "/data/media/podcasts"
     enabled = true
     categories = ["sponsor", "intro", "outro"]
 
+# Optional admin interface: a dashboard and configuration editor on its own port, meant to sit behind an
+# authenticating reverse proxy. Saving from the editor rewrites this file (comments are not kept; previous
+# versions are kept as <name>.bak.<time> and can be restored from the History tab).
+# Keep this port private (do not publish it directly); route an admin hostname to it through your proxy.
+# See docs/admin.md.
+[admin]
+enabled = false
+port = 8081
+# "proxy": trust the user header set by an authenticating reverse proxy (SWAG with Authelia/Authentik,
+#          or oauth2-proxy for Keycloak). Requests are accepted only from trusted_proxies.
+# "password": HTTP Basic authentication; create password_hash with: podsync --hash-password
+auth = "proxy"
+trusted_proxies = ["172.18.0.0/16"]  # the reverse proxy's address or Docker network
+user_header = "Remote-User"          # e.g. "X-Forwarded-User" or "X-Auth-Request-User" for oauth2-proxy
+# username = "admin"
+# password_hash = "$2a$10$..."
+
 # Podsync uses local database to store feeds and episodes metadata.
 # This section is optional and usually not needed to configure unless some very specific corner cases.
 # Refer to https://dgraph.io/docs/badger/get-started/#memory-usage for documentation.

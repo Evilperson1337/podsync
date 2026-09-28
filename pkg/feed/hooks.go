@@ -27,15 +27,15 @@ type ExecHook struct {
 	// Command is the command and arguments to execute.
 	// For single commands, use shell parsing: ["echo hello"]
 	// For multiple args, pass directly: ["curl", "-X", "POST", "url"]
-	Command []string `toml:"command"`
+	Command []string `toml:"command" doc:"Command and arguments. A single string runs through a shell (see shell)."`
 
 	// Shell enables explicit shell execution for single-string commands.
 	// Supported values: "", "sh", "cmd", "powershell", "pwsh", "none".
-	Shell string `toml:"shell"`
+	Shell string `toml:"shell" doc:"Shell for single-string commands: \"sh\", \"cmd\", \"powershell\" or \"pwsh\" (default: the platform shell)."`
 
 	// Timeout in seconds for command execution.
 	// If 0 or unset, defaults to 60 seconds.
-	Timeout int `toml:"timeout"`
+	Timeout int `toml:"timeout" doc:"Timeout in seconds."`
 }
 
 // Invoke executes the hook command with the provided environment variables.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 // unknownConfigKey is a key in the configuration file that no configuration field reads.
 type unknownConfigKey struct {
 	Path string
-	Line int
+	// Segments is Path as keys, with list indexes as decimal strings.
+	Segments []string
+	Line     int
 }
 
 func (k unknownConfigKey) String() string {
@@ -36,7 +39,7 @@ var (
 // case-insensitively.
 func findUnknownConfigKeys(tree *toml.Tree, target reflect.Type) []unknownConfigKey {
 	var found []unknownConfigKey
-	walkConfigTree(tree, target, "", &found)
+	walkConfigTree(tree, target, "", nil, 0, false, &found)
 	sort.Slice(found, func(i, j int) bool {
 		if found[i].Line != found[j].Line {
 			return found[i].Line < found[j].Line
@@ -46,7 +49,10 @@ func findUnknownConfigKeys(tree *toml.Tree, target reflect.Type) []unknownConfig
 	return found
 }
 
-func walkConfigTree(value interface{}, typ reflect.Type, path string, found *[]unknownConfigKey) {
+// parentLine is the line of the enclosing key. The TOML library reports positions inside inline
+// tables relative to the table, so a key that appears before its parent is inside an inline table;
+// line numbers are then omitted for it and everything below it rather than reported wrong.
+func walkConfigTree(value interface{}, typ reflect.Type, path string, segments []string, parentLine int, inline bool, found *[]unknownConfigKey) {
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
@@ -63,12 +69,19 @@ func walkConfigTree(value interface{}, typ reflect.Type, path string, found *[]u
 		}
 		for _, key := range tree.Keys() {
 			keyPath := joinConfigPath(path, key)
+			keySegments := append(append([]string{}, segments...), key)
+			line := tree.GetPositionPath([]string{key}).Line
+			keyInline := inline || line < parentLine
+			reported := line
+			if keyInline {
+				reported = 0
+			}
 			field, ok := configFieldForKey(typ, key)
 			if !ok {
-				*found = append(*found, unknownConfigKey{Path: keyPath, Line: tree.GetPositionPath([]string{key}).Line})
+				*found = append(*found, unknownConfigKey{Path: keyPath, Segments: keySegments, Line: reported})
 				continue
 			}
-			walkConfigTree(tree.GetPath([]string{key}), field.Type, keyPath, found)
+			walkConfigTree(tree.GetPath([]string{key}), field.Type, keyPath, keySegments, line, keyInline, found)
 		}
 
 	case reflect.Map:
@@ -77,18 +90,19 @@ func walkConfigTree(value interface{}, typ reflect.Type, path string, found *[]u
 			return
 		}
 		for _, key := range tree.Keys() {
-			walkConfigTree(tree.GetPath([]string{key}), typ.Elem(), joinConfigPath(path, key), found)
+			line := tree.GetPositionPath([]string{key}).Line
+			walkConfigTree(tree.GetPath([]string{key}), typ.Elem(), joinConfigPath(path, key), append(append([]string{}, segments...), key), line, inline || line < parentLine, found)
 		}
 
 	case reflect.Slice, reflect.Array:
 		switch items := value.(type) {
 		case []*toml.Tree:
 			for i, item := range items {
-				walkConfigTree(item, typ.Elem(), fmt.Sprintf("%s[%d]", path, i), found)
+				walkConfigTree(item, typ.Elem(), fmt.Sprintf("%s[%d]", path, i), append(append([]string{}, segments...), strconv.Itoa(i)), parentLine, inline, found)
 			}
 		case []interface{}:
 			for i, item := range items {
-				walkConfigTree(item, typ.Elem(), fmt.Sprintf("%s[%d]", path, i), found)
+				walkConfigTree(item, typ.Elem(), fmt.Sprintf("%s[%d]", path, i), append(append([]string{}, segments...), strconv.Itoa(i)), parentLine, inline, found)
 			}
 		}
 	}
