@@ -133,7 +133,29 @@ function feedRow(feed) {
     el("td", {}, [lastRun(feed)]),
     el("td", {}, [episodeChips(feed.episodes || {})]),
     el("td", {}, [abs]),
+    el("td", {}, [updateNowButton(feed.id)]),
   ]);
+}
+
+function updateNowButton(feedID) {
+  const button = el("button", { class: "button small-button", type: "button", text: "Update now" });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    const response = await apiSend("POST", `api/feeds/${encodeURIComponent(feedID)}/update`);
+    if (!response.ok) {
+      button.textContent = "Failed";
+      button.title = (response.data && response.data.error) || `HTTP ${response.status}`;
+    } else {
+      button.textContent = response.data.queued ? "Queued" : "Already running";
+    }
+    setTimeout(() => {
+      button.textContent = "Update now";
+      button.title = "";
+      button.disabled = false;
+      loadStatus();
+    }, 5000);
+  });
+  return button;
 }
 
 function stat(value, label) {

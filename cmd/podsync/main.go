@@ -329,7 +329,7 @@ func main() {
 		validateRuntime := func(next *Config) error { return validateRuntimeDependencies(ctx, next) }
 		adminServer, err := admin.New(admin.Options{
 			Config:     cfg.Admin,
-			Runtime:    adminRuntime{reloader: reloader, schedule: schedule},
+			Runtime:    adminRuntime{reloader: reloader, schedule: schedule, queue: scheduler},
 			DB:         database,
 			Version:    version,
 			ConfigPath: absPath(opts.ConfigPath),

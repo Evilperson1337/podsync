@@ -21,9 +21,15 @@ type FeedRuntime struct {
 	NextRun time.Time
 }
 
+// ErrFeedNotFound means a request named a feed that is not configured.
+var ErrFeedNotFound = errors.New("feed not found")
+
 // Runtime exposes the running configuration to the admin interface. It reflects reloads.
 type Runtime interface {
 	Feeds() []FeedRuntime
+	// UpdateNow queues an immediate update of a feed. It returns false when an update of that
+	// feed is already queued or running, and ErrFeedNotFound for an unknown feed.
+	UpdateNow(feedID string) (bool, error)
 }
 
 // Status is the dashboard payload.

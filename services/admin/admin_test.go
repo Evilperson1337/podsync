@@ -23,6 +23,15 @@ type fakeRuntime struct{ feeds []FeedRuntime }
 
 func (r fakeRuntime) Feeds() []FeedRuntime { return r.feeds }
 
+func (r fakeRuntime) UpdateNow(feedID string) (bool, error) {
+	for _, f := range r.feeds {
+		if f.Config.ID == feedID {
+			return feedID != "busy", nil
+		}
+	}
+	return false, ErrFeedNotFound
+}
+
 func passwordHash(t *testing.T, password string) string {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
@@ -278,4 +287,33 @@ func TestSchemaEndpoint(t *testing.T) {
 	rec := serve(srv, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.JSONEq(t, `{"type":"object"}`, strings.TrimSpace(rec.Body.String()))
+}
+
+func TestUpdateNowEndpoint(t *testing.T) {
+	runtime := fakeRuntime{feeds: []FeedRuntime{
+		{Config: &feed.Config{ID: "show"}},
+		{Config: &feed.Config{ID: "busy"}},
+	}}
+	srv, _ := newTestServer(t, proxyConfig(), runtime)
+	post := func(path string, csrf bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "10.0.0.2:1"
+		req.Header.Set("Remote-User", "alice")
+		if csrf {
+			req.Header.Set(csrfHeader, "1")
+		}
+		return serve(srv, req)
+	}
+
+	assert.Equal(t, http.StatusForbidden, post("/api/feeds/show/update", false).Code, "needs the same-origin header")
+
+	rec := post("/api/feeds/show/update", true)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.JSONEq(t, `{"queued":true}`, rec.Body.String())
+
+	rec = post("/api/feeds/busy/update", true)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.JSONEq(t, `{"queued":false}`, rec.Body.String(), "an update already queued is reported, not an error")
+
+	assert.Equal(t, http.StatusNotFound, post("/api/feeds/nope/update", true).Code)
 }

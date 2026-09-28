@@ -56,6 +56,7 @@ func New(opts Options) (*Server, error) {
 	mux.HandleFunc("GET /api/me", srv.handleMe)
 	mux.HandleFunc("GET /api/status", srv.handleStatus)
 	mux.HandleFunc("GET /api/schema", srv.handleSchema)
+	mux.HandleFunc("POST /api/feeds/{id}/update", srv.handleUpdateNow)
 	if opts.Store != nil {
 		srv.registerConfigRoutes(mux)
 	}
@@ -86,6 +87,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status.Version = s.opts.Version
 	status.ConfigPath = s.opts.ConfigPath
 	writeJSON(w, status)
+}
+
+func (s *Server) handleUpdateNow(w http.ResponseWriter, r *http.Request) {
+	feedID := r.PathValue("id")
+	queued, err := s.opts.Runtime.UpdateNow(feedID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrFeedNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err, nil, nil)
+		return
+	}
+	log.WithFields(log.Fields{"feed_id": feedID, "user": UserFromContext(r.Context()), "queued": queued}).Info("feed update requested via the admin interface")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]bool{"queued": queued})
 }
 
 func (s *Server) handleSchema(w http.ResponseWriter, _ *http.Request) {

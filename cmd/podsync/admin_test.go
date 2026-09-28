@@ -14,6 +14,7 @@ import (
 
 	"github.com/mxpv/podsync/pkg/configschema"
 	"github.com/mxpv/podsync/pkg/feed"
+	"github.com/mxpv/podsync/services/admin"
 )
 
 func TestLoadConfig_Admin(t *testing.T) {
@@ -187,4 +188,19 @@ func TestConfigSchemaDescribesEveryOption(t *testing.T) {
 	}
 	walk(schema, "")
 	assert.Empty(t, missing, "options without a doc tag")
+}
+
+func TestAdminRuntimeUpdateNow(t *testing.T) {
+	reloader, _, queue, _ := newTestReloader(t, reloadBaseConfig)
+	queue.enqueued = nil
+	runtime := adminRuntime{reloader: reloader, schedule: reloader.schedule, queue: queue}
+
+	queued, err := runtime.UpdateNow("show")
+	require.NoError(t, err)
+	assert.True(t, queued)
+	assert.Equal(t, []string{"show"}, queue.enqueued)
+
+	_, err = runtime.UpdateNow("missing")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, admin.ErrFeedNotFound)
 }

@@ -17,6 +17,17 @@ import (
 type adminRuntime struct {
 	reloader *configReloader
 	schedule *feedSchedule
+	queue    feedEnqueuer
+}
+
+// UpdateNow queues an immediate update through the scheduler, which merges duplicate requests.
+func (r adminRuntime) UpdateNow(feedID string) (bool, error) {
+	cfg := r.reloader.Current()
+	feedConfig, ok := cfg.Feeds[feedID]
+	if !ok {
+		return false, errors.Wrapf(admin.ErrFeedNotFound, "%q", feedID)
+	}
+	return r.queue.Enqueue(feedConfig), nil
 }
 
 func (r adminRuntime) Feeds() []admin.FeedRuntime {
