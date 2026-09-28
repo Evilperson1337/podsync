@@ -5,21 +5,24 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/pelletier/go-toml"
 	"github.com/pkg/errors"
+	"github.com/robfig/cron/v3"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/mxpv/podsync/pkg/audiobookshelf"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/fs"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/pkg/ytdl"
+	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
 )
 
@@ -43,6 +46,8 @@ type Config struct {
 	Signatures SignatureConfig `toml:"signatures"`
 	// Global cleanup policy applied to feeds that don't specify their own cleanup policy
 	Cleanup *feed.Cleanup `toml:"cleanup"`
+	// Audiobookshelf is the optional hardlink export into an Audiobookshelf podcast library
+	Audiobookshelf audiobookshelf.Config `toml:"audiobookshelf"`
 }
 
 type SignatureConfig struct {
@@ -64,16 +69,38 @@ type Log struct {
 	Debug bool `toml:"debug"`
 }
 
-// LoadConfig loads TOML configuration from a file path
+// ErrConfigNotFound is returned by LoadConfig when the configuration file does not exist.
+var ErrConfigNotFound = errors.New("configuration file not found")
+
+// LoadConfig loads configuration from a file path. The format (TOML, YAML or JSON) is chosen by
+// the file extension, and PODSYNC__SECTION__KEY environment variables override file values.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.Wrapf(ErrConfigNotFound, "%s", path)
+		}
 		return nil, errors.Wrapf(err, "failed to read config file: %s", path)
 	}
 
+	format := configFormatFor(path)
+	tree, err := parseConfigTree(format, data)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse %s as %s", path, strings.ToUpper(string(format)))
+	}
 	config := Config{}
-	if err := toml.Unmarshal(data, &config); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal toml")
+	if err := applyConfigEnvOverrides(tree, reflect.TypeOf(config), os.Environ()); err != nil {
+		return nil, err
+	}
+	if err := tree.Unmarshal(&config); err != nil {
+		return nil, errors.Wrapf(err, "failed to decode %s", path)
+	}
+	if unknown := findUnknownConfigKeys(tree, reflect.TypeOf(config)); len(unknown) > 0 {
+		keys := make([]string, 0, len(unknown))
+		for _, key := range unknown {
+			keys = append(keys, key.String())
+		}
+		return nil, errors.Errorf("unknown configuration keys in %s (check for typos or misplaced sections): %s", path, strings.Join(keys, ", "))
 	}
 
 	for id, f := range config.Feeds {
@@ -129,15 +156,17 @@ func (c *Config) validate() error {
 		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
 	}
 
-	if len(c.Feeds) == 0 {
-		result = multierror.Append(result, errors.New("at least one feed must be specified"))
-	}
-
 	for id, f := range c.Feeds {
 		mergeFeedCustom(f)
 
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
+		}
+
+		if f.CronSchedule != "" {
+			if _, err := cron.ParseStandard(f.CronSchedule); err != nil {
+				result = multierror.Append(result, errors.Wrapf(err, "invalid cron_schedule %q for %q", f.CronSchedule, id))
+			}
 		}
 
 		if err := validateCustomFormat(id, f); err != nil {
@@ -165,9 +194,123 @@ func (c *Config) validate() error {
 		if err := validateSponsorBlockConfig(id, f.Custom.SponsorBlockConfig()); err != nil {
 			result = multierror.Append(result, err)
 		}
+
+		if err := validateFeedAudiobookshelf(id, f.Audiobookshelf, c.Audiobookshelf.Enabled); err != nil {
+			result = multierror.Append(result, err)
+		}
+
+		if err := c.validateSignatureRules(id, f); err != nil {
+			result = multierror.Append(result, err)
+		}
+	}
+
+	if err := c.validateAudiobookshelf(); err != nil {
+		result = multierror.Append(result, err)
 	}
 
 	return result.ErrorOrNil()
+}
+
+// signaturesRoot resolves the signatures root the updater will use.
+func (c *Config) signaturesRoot() string {
+	localDataDir := ""
+	if c.Storage.Type == "local" {
+		localDataDir = c.Storage.Local.DataDir
+	}
+	return update.ResolveSignaturesRoot(c.Signatures.RootDir, localDataDir)
+}
+
+// validateSignatureRules fails on invalid signature_rules configured in TOML, including missing
+// signature files. A legacy rules.json is checked too, but its problems are only logged so that
+// existing deployments keep starting.
+func (c *Config) validateSignatureRules(feedID string, f *feed.Config) error {
+	root := c.signaturesRoot()
+	rulesPath := ""
+	if root != "" {
+		rulesPath = update.SignatureRulesPath(root, feedID)
+	}
+
+	if len(f.SignatureRules) == 0 {
+		if rulesPath != "" {
+			warnRulesJSON(feedID, root, rulesPath)
+		}
+		return nil
+	}
+
+	if rulesPath != "" {
+		if _, err := os.Stat(rulesPath); err == nil {
+			log.Warnf("signature_rules are configured for %q, so %s is ignored", feedID, rulesPath)
+		}
+	}
+	var result *multierror.Error
+	for idx, rule := range f.SignatureRules {
+		if err := checkSignatureRule(root, feedID, rule); err != nil {
+			result = multierror.Append(result, errors.Wrapf(err, "signature_rules[%d] for %q", idx, feedID))
+		}
+	}
+	return result.ErrorOrNil()
+}
+
+func warnRulesJSON(feedID, root, rulesPath string) {
+	parsed, ok, err := update.ReadSignatureRules(rulesPath)
+	if err != nil {
+		log.WithError(err).Warnf("signature rules for %q in %s cannot be read; signature trimming will fail for this feed", feedID, rulesPath)
+		return
+	}
+	if !ok {
+		return
+	}
+	for idx, rule := range parsed.Rules {
+		if err := checkSignatureRule(root, feedID, rule); err != nil {
+			log.WithError(err).Warnf("rule %d in %s for %q will be skipped", idx, rulesPath, feedID)
+		}
+	}
+}
+
+// checkSignatureRule validates a rule's fields and that its signature file exists and is not empty.
+func checkSignatureRule(root, feedID string, rule feed.SignatureRule) error {
+	if err := rule.Validate(); err != nil {
+		return err
+	}
+	path := update.SignatureFilePath(root, feedID, rule.File)
+	if path == "" {
+		return errors.Errorf("relative file %q needs [signatures] root_dir (or an absolute path) when not using local storage", rule.File)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return errors.Wrapf(err, "signature file %q is not accessible", path)
+	}
+	if info.IsDir() || info.Size() == 0 {
+		return errors.Errorf("signature file %q is empty or not a file", path)
+	}
+	return nil
+}
+
+func (c *Config) validateAudiobookshelf() error {
+	if !c.Audiobookshelf.Enabled {
+		return nil
+	}
+	var result *multierror.Error
+	if strings.TrimSpace(c.Audiobookshelf.PodcastRoot) == "" {
+		result = multierror.Append(result, errors.New("audiobookshelf.podcast_root is required when audiobookshelf export is enabled"))
+	}
+	if c.Storage.Type != "local" {
+		result = multierror.Append(result, errors.Errorf("audiobookshelf export requires local storage (hardlinks cannot be created from %q storage)", c.Storage.Type))
+	}
+	return result.ErrorOrNil()
+}
+
+func validateFeedAudiobookshelf(feedID string, cfg audiobookshelf.FeedConfig, globalEnabled bool) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if err := audiobookshelf.ValidateDirectory(cfg.Directory); err != nil {
+		return errors.Wrapf(err, "invalid audiobookshelf.directory for %q", feedID)
+	}
+	if !globalEnabled {
+		log.Warnf("audiobookshelf export is enabled for feed %q but disabled globally; set [audiobookshelf] enabled = true to export", feedID)
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults(configPath string) {
@@ -181,6 +324,12 @@ func (c *Config) applyDefaults(configPath string) {
 
 	if c.Storage.Type == "" {
 		c.Storage.Type = "local"
+	}
+
+	// Default local storage next to the config file, like the database directory. The deprecated
+	// server.data_dir still takes precedence (see validate).
+	if c.Storage.Type == "local" && c.Storage.Local.DataDir == "" && c.Server.DataDir == "" {
+		c.Storage.Local.DataDir = filepath.Join(filepath.Dir(configPath), "data")
 	}
 
 	if c.Log.Filename != "" {
@@ -389,6 +538,11 @@ func (c *Config) applyEnv() {
 type StringSlice []string
 
 func (s *StringSlice) UnmarshalTOML(v interface{}) error {
+	// Trees built from YAML/JSON (toml.TreeFromMap) hold typed string lists.
+	if list, ok := v.([]string); ok {
+		*s = append([]string(nil), list...)
+		return nil
+	}
 	if list, ok := v.([]interface{}); ok {
 		result := make([]string, 0, len(list))
 		for _, entry := range list {

@@ -58,6 +58,7 @@ brew install yt-dlp ffmpeg go
 - [Audio signature examples (Windows)](./docs/audio_signature_examples.md)
 - [Runtime architecture](./docs/runtime_architecture.md)
 - [Observability and operations](./docs/observability.md)
+- [Audiobookshelf hardlink export](./docs/audiobookshelf.md)
 
 ## 🌙 Nightly builds
 
@@ -78,6 +79,19 @@ In order to query YouTube or Vimeo API you have to obtain an API token first.
 
 You need to create a configuration file (for instance `config.toml`) and specify the list of feeds that you're going to host.
 See [config.toml.example](./config.toml.example) for all possible configuration keys available in Podsync.
+
+Configuration files can be written in TOML (default), YAML (`.yaml`/`.yml`) or JSON (`.json`); the format is chosen by the file extension, and every format uses the same keys and nesting. When the default `config.toml` does not exist, Podsync also looks for `config.yaml`, `config.yml` or `config.json` next to it. Unknown keys are rejected at startup in every format. For example, in YAML:
+
+```yaml
+server:
+  port: 8080
+tokens:
+  youtube: PASTE YOUR API KEY HERE
+feeds:
+  ID1:
+    url: https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ
+    update_period: 12h
+```
 
 Minimal configuration would look like this:
 
@@ -138,14 +152,21 @@ Hook commands are now platform-aware. Multi-argument commands execute directly. 
 
 ### Signature configuration
 
-Optional signature trimming root can now be configured explicitly:
+Audio signature trimming is built into the standard binary and Docker image. Configure rules per feed:
 
 ```toml
-[signatures]
-root_dir = "/app/data"
+[[feeds.ID1.signature_rules]]
+file = "intro.wav"          # relative to <signatures_root>/ID1/signatures/, or absolute
+action = "cut_before"
+
+[[feeds.ID1.signature_rules]]
+file = "ad_break.wav"
+action = "remove_segment"
+post = 60
+max_matches = 10
 ```
 
-When signature-related features are enabled, Podsync validates `ffmpeg` and `ffprobe` availability during startup.
+Rules are validated at startup, including whether each signature file exists. The signatures root defaults to the local storage `data_dir`, and can be set with `[signatures] root_dir` or `PODSYNC_SIGNATURES_DIR`. A legacy per-feed `rules.json` is still read for feeds without `signature_rules`. When any feed uses signature trimming (or SponsorBlock), Podsync checks for `ffmpeg` and `ffprobe` at startup. See [Audio signature detection](./docs/audio_signature_detection.md) for all fields.
 
 ### Storage publication semantics
 
@@ -155,17 +176,68 @@ Publication activity is also persisted through summary metadata so XML/OPML buil
 
 Podsync now also uses an explicit staged publish helper above [`fs.Storage`](pkg/fs/storage.go) for media and publication artifacts. Content is staged, minimum-size validated where appropriate, and only then committed to the underlying backend.
 
+### Audiobookshelf export
+
+Podsync can hardlink finalized episodes into an existing Audiobookshelf podcast directory, so no extra disk space is used. Export is opt-in, requires local storage, and requires both paths to be on the same filesystem. Podsync never falls back to copying.
+
+```toml
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds.doctrine.audiobookshelf]
+enabled = true
+directory = "Doctrine"
+```
+
+The Audiobookshelf directory mirrors Podsync in both directions: episodes removed by Podsync cleanup (or deleted from Podsync storage) are removed from Audiobookshelf, and episodes deleted in Audiobookshelf are removed from Podsync. Podsync only deletes files it can verify are its own hardlinks. See [Audiobookshelf hardlink export](./docs/audiobookshelf.md) for Docker/Unraid mappings and validation steps.
+
+### Reloading the configuration
+
+Podsync applies configuration changes without a restart. It checks the configuration file every few seconds and reloads it after a change, and it also reloads on `SIGHUP` (`docker kill -s HUP <container>`).
+
+- **Applied immediately:** feeds (added, removed or changed, including filters, signature rules and Audiobookshelf settings), API tokens, and the global `[cleanup]` policy. A new feed gets an initial update right away.
+- **Needs a restart:** `[server]`, `[storage]`, `[database]`, `[downloader]`, `[log]`, `[signatures]` and the global `[audiobookshelf]` section. Podsync logs a warning when these change.
+- **Invalid changes are rejected:** if the edited file does not load (a typo, a half-saved file), Podsync logs why and keeps running with the previous configuration.
+- Removing a feed stops its updates. Its downloaded episodes stay in storage.
+- Disable file watching with `--no-config-watch` (or `PODSYNC_NO_CONFIG_WATCH=true`); `SIGHUP` still reloads.
+
+In Docker, mount the directory that contains the configuration rather than the file itself: many editors save by replacing the file, and a single-file bind mount keeps showing the old version inside the container.
+
+```bash
+docker run -v /srv/podsync/config:/app/config -e PODSYNC_CONFIG_PATH=/app/config/config.toml ...
+```
+
 ### 🌍 Environment Variables
 
 Podsync supports the following environment variables for configuration and API keys:
 
 | Variable Name                | Description                                                                               | Example Value(s)                              |
 |------------------------------|-------------------------------------------------------------------------------------------|-----------------------------------------------|
-| `PODSYNC_CONFIG_PATH`        | Path to the configuration file (overrides `--config` CLI flag)                            | `/app/config.toml`                            |
+| `PODSYNC_CONFIG_PATH`        | Path to the configuration file (used when `--config` is not passed)                      | `/app/config.toml`                            |
 | `PODSYNC_YOUTUBE_API_KEY`    | YouTube API key(s), space-separated for rotation                                          | `key1` or `key1 key2 key3` |
 | `PODSYNC_VIMEO_API_KEY`      | Vimeo API key(s), space-separated for rotation                                            | `key1` or `key1 key2`        |
 | `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
 | `PODSYNC_TWITCH_API_KEY`     | Twitch API credentials in the format `CLIENT_ID:CLIENT_SECRET`, space-separated for multi | `id1:secret1 id2:secret2`                     |
+| `PODSYNC__<SECTION>__<KEY>`  | Override any configuration key (see below)                                                | `PODSYNC__SERVER__PORT=9000`                  |
+
+#### Overriding configuration keys
+
+Any configuration key can be set from the environment with `PODSYNC__` followed by the key path, using a double underscore between levels. Overrides apply on top of the configuration file, whatever its format:
+
+```bash
+PODSYNC__SERVER__PORT=9000                      # [server] port
+PODSYNC__SERVER__HOSTNAME=https://pod.example.com
+PODSYNC__STORAGE__LOCAL__DATA_DIR=/data/podsync  # [storage.local] data_dir
+PODSYNC__TOKENS__YOUTUBE="key1 key2"             # space-separated keys rotate
+PODSYNC__FEEDS__DOCTRINE__PAGE_SIZE=5            # [feeds.doctrine] page_size
+PODSYNC__FEEDS__DOCTRINE__YOUTUBE_DL_ARGS="--embed-thumbnail,--no-mtime"  # comma-separated lists
+```
+
+- Names are case-insensitive. A feed ID that already exists in the file keeps its spelling (`DOCTRINE` matches `[feeds.Doctrine]`); a new feed ID from the environment is lowercase.
+- Values are converted to the option's type: numbers, `true`/`false`, durations such as `6h`, and comma-separated lists. Lists of tables, such as `signature_rules` and hooks, can only be set in the file.
+- An unknown key or an invalid value stops startup with an error that names the variable. Override values are never logged.
+- The older `PODSYNC_<PROVIDER>_API_KEY` variables are applied last, so they win over `PODSYNC__TOKENS__*`.
 
 ## 🚀 Getting started
 
@@ -187,14 +259,30 @@ If you do not see any update activity after startup, the most common causes are:
 - provider API credentials are missing,
 - or your feeds are configured with a schedule you are not expecting.
 
-### 1. Create a minimal configuration
+### 1. Create a configuration
 
-You need a [`config.toml`](README.md) file that defines:
+Podsync reads its settings from a `config.toml` file. The easiest way to get one is to let Podsync write a starter file:
 
-- a web server port,
-- local storage,
-- API tokens if required by the provider,
-- and at least one feed under `[feeds]`.
+```bash
+podsync --init --config config.toml
+```
+
+If you start Podsync and no configuration file exists at the `--config` path (default `config.toml`), it writes the same starter file there, logs where it was written, and keeps running with no feeds. Edit the file to add your feeds, then restart. In Docker, mount the file (see below) so your edits survive container restarts.
+
+A configuration needs:
+
+- API tokens for providers that require them,
+- and at least one feed under `[feeds]` to actually sync anything.
+
+The web server port defaults to 8080, and local storage defaults to a `data` directory next to the config file (`/app/data` in Docker).
+
+Check a configuration without starting the server:
+
+```bash
+podsync --check-config --config config.toml
+```
+
+This reports invalid values, unknown keys (for example a misspelled option, reported with its line number), and missing runtime tools such as `ffmpeg`, then exits.
 
 Minimal example:
 
@@ -222,7 +310,7 @@ Notes:
 
 - `update_period = "30m"` is useful for testing because it is easy to reason about.
 - If you use `cron_schedule`, Podsync expects standard cron syntax as documented in [`docs/cron.md`](docs/cron.md).
-- The sample file in [`bin/config.toml`](bin/config.toml) is a fuller example, but many of its feeds use explicit cron schedules, which can make startup look idle if you expect immediate downloads.
+- [`config.toml.example`](config.toml.example) shows every available option. Its example feed uses an explicit `cron_schedule`, which can make startup look idle if you expect immediate downloads.
 
 ### 2. Run with Docker
 

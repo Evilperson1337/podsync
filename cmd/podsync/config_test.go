@@ -526,6 +526,138 @@ type = "s3"
 	})
 }
 
+func TestLoadConfig_Audiobookshelf(t *testing.T) {
+	const localStorage = `
+[storage]
+type = "local"
+  [storage.local]
+  data_dir = "/data/podsync"
+`
+
+	t.Run("disabled by default", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`)
+		defer os.Remove(path)
+
+		config, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.False(t, config.Audiobookshelf.Enabled)
+		assert.Empty(t, config.Audiobookshelf.PodcastRoot)
+		assert.False(t, config.Feeds["doctrine"].Audiobookshelf.Enabled)
+		assert.Empty(t, config.Feeds["doctrine"].Audiobookshelf.Directory)
+	})
+
+	t.Run("valid global and feed config parses", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [feeds.doctrine.audiobookshelf]
+  enabled = true
+  directory = "Doctrine"
+`)
+		defer os.Remove(path)
+
+		config, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.True(t, config.Audiobookshelf.Enabled)
+		assert.Equal(t, "/data/media/podcasts", config.Audiobookshelf.PodcastRoot)
+		assert.True(t, config.Feeds["doctrine"].Audiobookshelf.Enabled)
+		assert.Equal(t, "Doctrine", config.Feeds["doctrine"].Audiobookshelf.Directory)
+	})
+
+	t.Run("missing podcast_root fails", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "audiobookshelf.podcast_root is required")
+	})
+
+	t.Run("missing feed directory fails", func(t *testing.T) {
+		path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [feeds.doctrine.audiobookshelf]
+  enabled = true
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `invalid audiobookshelf.directory for "doctrine"`)
+	})
+
+	for name, dir := range map[string]string{"traversal": "../escape", "absolute": "/data/media/podcasts/Doctrine"} {
+		t.Run(name+" feed directory fails", func(t *testing.T) {
+			path := setup(t, localStorage+`
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [feeds.doctrine.audiobookshelf]
+  enabled = true
+  directory = "`+dir+`"
+`)
+			defer os.Remove(path)
+
+			_, err := LoadConfig(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "audiobookshelf.directory")
+		})
+	}
+
+	t.Run("s3 storage is rejected", func(t *testing.T) {
+		path := setup(t, `
+[server]
+hostname = "https://podsync.example.com"
+
+[storage]
+type = "s3"
+  [storage.s3]
+  endpoint_url = "https://s3.example.com"
+  region = "us-east-1"
+  bucket = "podsync"
+
+[audiobookshelf]
+enabled = true
+podcast_root = "/data/media/podcasts"
+
+[feeds]
+  [feeds.doctrine]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "audiobookshelf export requires local storage")
+	})
+}
+
 func setup(t *testing.T, file string) string {
 	t.Helper()
 
@@ -538,4 +670,150 @@ func setup(t *testing.T, file string) string {
 	require.NoError(t, err)
 
 	return f.Name()
+}
+
+func TestLoadConfig_SignatureRules(t *testing.T) {
+	t.Setenv("PODSYNC_SIGNATURES_DIR", "")
+
+	// newDataDir creates a local data dir holding feed "show"'s signature file.
+	newDataDir := func(t *testing.T) string {
+		dataDir := t.TempDir()
+		sigDir := filepath.Join(dataDir, "show", "signatures")
+		require.NoError(t, os.MkdirAll(sigDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(sigDir, "intro.wav"), []byte("RIFF"), 0644))
+		return dataDir
+	}
+	configFor := func(dataDir string, rules string) string {
+		return `
+[storage]
+type = "local"
+  [storage.local]
+  data_dir = "` + filepath.ToSlash(dataDir) + `"
+
+[feeds]
+  [feeds.show]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+` + rules
+	}
+
+	t.Run("valid rules parse", func(t *testing.T) {
+		path := setup(t, configFor(newDataDir(t), `
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "cut_before"
+  pre = 0
+  post = 1.5
+
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "remove_segment"
+  post = 60
+  max_matches = 10
+  min_score = 0.75
+  min_peak_ratio = 2
+`))
+		defer os.Remove(path)
+
+		config, err := LoadConfig(path)
+		require.NoError(t, err)
+		rules := config.Feeds["show"].SignatureRules
+		require.Len(t, rules, 2)
+		assert.Equal(t, "cut_before", rules[0].Action)
+		assert.EqualValues(t, 1.5, rules[0].PostSeconds)
+		assert.Equal(t, 10, rules[1].MaxMatches)
+		assert.EqualValues(t, 60, rules[1].PostSeconds, "integer values are accepted for decimal fields")
+		assert.EqualValues(t, 0.75, rules[1].MinScore)
+		assert.EqualValues(t, 2, rules[1].MinPeakRatio)
+	})
+
+	t.Run("invalid action fails", func(t *testing.T) {
+		path := setup(t, configFor(newDataDir(t), `
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "cut_befor"
+`))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `signature_rules[0] for "show"`)
+		assert.Contains(t, err.Error(), `"cut_befor"`)
+	})
+
+	t.Run("missing signature file fails", func(t *testing.T) {
+		path := setup(t, configFor(newDataDir(t), `
+  [[feeds.show.signature_rules]]
+  file = "intro.wv"
+  action = "cut_before"
+`))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "intro.wv")
+	})
+
+	t.Run("relative file with s3 and no root fails", func(t *testing.T) {
+		path := setup(t, `
+[server]
+hostname = "https://podsync.example.com"
+
+[storage]
+type = "s3"
+  [storage.s3]
+  endpoint_url = "https://s3.example.com"
+  region = "us-east-1"
+  bucket = "podsync"
+
+[feeds]
+  [feeds.show]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  [[feeds.show.signature_rules]]
+  file = "intro.wav"
+  action = "cut_before"
+`)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "root_dir")
+	})
+
+	t.Run("absolute file resolves without data dir layout", func(t *testing.T) {
+		sig := filepath.Join(t.TempDir(), "sig.wav")
+		require.NoError(t, os.WriteFile(sig, []byte("RIFF"), 0644))
+		path := setup(t, configFor(t.TempDir(), `
+  [[feeds.show.signature_rules]]
+  file = "`+filepath.ToSlash(sig)+`"
+  action = "cut_after"
+`))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.NoError(t, err)
+	})
+
+	t.Run("broken rules.json only warns", func(t *testing.T) {
+		dataDir := newDataDir(t)
+		require.NoError(t, os.WriteFile(filepath.Join(dataDir, "show", "signatures", "rules.json"), []byte(`{"rules":[{"file":"nope.wav","action":"bad"}]}`), 0644))
+		path := setup(t, configFor(dataDir, ""))
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.NoError(t, err)
+	})
+}
+
+func TestLoadConfig_InvalidCronSchedule(t *testing.T) {
+	path := setup(t, `
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40&list=PL123"
+  cron_schedule = "every day at 3"
+`)
+	defer os.Remove(path)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid cron_schedule "every day at 3" for "A"`)
 }

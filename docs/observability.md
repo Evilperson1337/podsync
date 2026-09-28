@@ -22,6 +22,7 @@ Important counters include:
 - feed run success/failure counters from [`services/update/updater.go`](../services/update/updater.go)
 - publication XML/OPML counters from [`services/update/updater.go`](../services/update/updater.go)
 - reconciled episode counters from [`services/update/updater.go`](../services/update/updater.go)
+- Audiobookshelf export counters `audiobookshelf_links_created_total`, `audiobookshelf_links_removed_total`, `audiobookshelf_mirrored_deletions_total` and `audiobookshelf_export_failures_total` (see [Audiobookshelf export](./audiobookshelf.md))
 
 ## Execution tracing
 

@@ -30,7 +30,8 @@ type Peak struct {
 //
 //	scores := CorrelateNormalized(signal, pattern)
 //
-// Notes: Uses O(n*m) and is intended for envelope-level sizes.
+// Notes: Short patterns use a direct O(n*m) loop; long patterns (see fftMinPatternLength) use
+// FFT in O(n log n) with equivalent results.
 func CorrelateNormalized(signal []float64, pattern []float64) []float64 {
 	if len(signal) == 0 || len(pattern) == 0 || len(signal) < len(pattern) {
 		return []float64{}
@@ -43,6 +44,13 @@ func CorrelateNormalized(signal []float64, pattern []float64) []float64 {
 		return []float64{}
 	}
 	patEnergy = math.Sqrt(patEnergy)
+	if len(pattern) >= fftMinPatternLength {
+		return correlateNormalizedFFT(signal, pattern, patEnergy)
+	}
+	return correlateNormalizedDirect(signal, pattern, patEnergy)
+}
+
+func correlateNormalizedDirect(signal []float64, pattern []float64, patEnergy float64) []float64 {
 	maxOffset := len(signal) - len(pattern)
 	scores := make([]float64, maxOffset+1)
 	for offset := 0; offset <= maxOffset; offset++ {
@@ -84,6 +92,55 @@ func TopKPeaks(scores []float64, k int) []Peak {
 		return peaks[:k]
 	}
 	return peaks
+}
+
+// SeparatedPeaks returns up to limit peaks, strongest first, with every pair of chosen peaks at
+// least minSeparation offsets apart (greedy non-maximum suppression).
+// Inputs:
+// - scores: per-offset scores.
+// - minSeparation: minimum distance between chosen offsets (values below 1 are treated as 1).
+// - limit: maximum peaks to return.
+// Outputs:
+// - peaks sorted descending by score.
+// Example usage:
+//
+//	candidates := SeparatedPeaks(scores, len(signatureEnvelope), 10)
+//
+// Notes: Used to find repeated occurrences, where TopKPeaks would return neighbors of one peak.
+func SeparatedPeaks(scores []float64, minSeparation int, limit int) []Peak {
+	if limit <= 0 || len(scores) == 0 {
+		return []Peak{}
+	}
+	if minSeparation < 1 {
+		minSeparation = 1
+	}
+	order := make([]int, len(scores))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool { return scores[order[i]] > scores[order[j]] })
+
+	chosen := make([]Peak, 0, limit)
+	for _, offset := range order {
+		if len(chosen) >= limit {
+			break
+		}
+		separated := true
+		for _, peak := range chosen {
+			distance := offset - peak.Offset
+			if distance < 0 {
+				distance = -distance
+			}
+			if distance < minSeparation {
+				separated = false
+				break
+			}
+		}
+		if separated {
+			chosen = append(chosen, Peak{Offset: offset, Score: scores[offset]})
+		}
+	}
+	return chosen
 }
 
 // BestPeakRatio computes best/second-best ratio for a peak list.

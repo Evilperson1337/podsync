@@ -26,9 +26,9 @@ type trimOperation struct {
 }
 
 // applyMatchedRules applies all detected rules on the original input in a single pass.
-// Inputs: ctx, inputPath, inputDur, matches, logger.
+// Inputs: ctx, inputPath, inputDur, matches, extension (published file extension, e.g. ".mp3"), logger.
 // Outputs: new input path, cleanup func, error.
-func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, inputDur time.Duration, matches []matchedRule, logger log.FieldLogger) (string, func(), error) {
+func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, inputDur time.Duration, matches []matchedRule, extension string, logger log.FieldLogger) (string, func(), error) {
 	if inputDur <= 0 {
 		inputDur = resultDurationOrZero(ctx, inputPath, logger)
 	}
@@ -46,7 +46,32 @@ func (u *Manager) applyMatchedRules(ctx context.Context, inputPath string, input
 		logger.Info("[trim] No effective trimming needed")
 		return inputPath, func() {}, nil
 	}
-	return u.trimConcatRanges(ctx, inputPath, keep, logger)
+
+	streams, err := probeMediaStreams(ctx, inputPath)
+	if err != nil {
+		logger.WithError(err).Warn("[trim] Stream probe failed; assuming audio matching the feed extension")
+		streams = mediaStreams{audioCodec: strings.TrimPrefix(strings.ToLower(extension), ".")}
+	}
+	encoding := selectTrimEncoding(extension, streams)
+	bitrateKbps := 0
+	if encoding.lossy {
+		if bitrateKbps, err = audiosig.FFprobeAudioBitrate(ctx, inputPath); err != nil {
+			logger.WithError(err).Debug("[trim] Bitrate lookup failed; using encoder default")
+			bitrateKbps = 0
+		}
+	}
+	logger.WithFields(log.Fields{
+		"extension":    extension,
+		"has_video":    streams.hasVideo,
+		"audio_codec":  streams.audioCodec,
+		"encoder":      encoding.encoder,
+		"stream_copy":  encoding.streamCopy(),
+		"bitrate_kbps": bitrateKbps,
+	}).Info("[trim] Selected trim output encoding")
+	if encoding.streamCopy() && streams.hasVideo {
+		logger.Info("[trim] Video is stream-copied; cuts are aligned to the nearest keyframe")
+	}
+	return u.trimConcatRanges(ctx, inputPath, keep, encoding, bitrateKbps, logger)
 }
 
 func buildTrimPlan(inputDur time.Duration, matches []matchedRule, logger log.FieldLogger) []timeRange {
@@ -81,8 +106,8 @@ func buildTrimPlan(inputDur time.Duration, matches []matchedRule, logger log.Fie
 func buildTrimOperation(inputDur time.Duration, match matchedRule, logger log.FieldLogger) (trimOperation, bool) {
 	rule := match.rule
 	result := match.result
-	start := result.SignatureStart - time.Duration(rule.PreSeconds*float64(time.Second))
-	end := result.SignatureEnd + time.Duration(rule.PostSeconds*float64(time.Second))
+	start := result.SignatureStart - rule.PreSeconds.Seconds()
+	end := result.SignatureEnd + rule.PostSeconds.Seconds()
 	if start < 0 {
 		start = 0
 	}
@@ -112,7 +137,7 @@ func buildTrimOperation(inputDur time.Duration, match matchedRule, logger log.Fi
 //	newPath, cleanup, err := u.trimKeepRange(ctx, inputPath, 10*time.Second, 120*time.Second, logger)
 //
 // Notes: Writes a new temp file.
-func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart time.Duration, keepEnd time.Duration, logger log.FieldLogger) (string, func(), error) {
+func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart time.Duration, keepEnd time.Duration, encoding trimEncoding, bitrateKbps int, logger log.FieldLogger) (string, func(), error) {
 	if keepEnd < keepStart {
 		return inputPath, func() {}, nil
 	}
@@ -121,33 +146,21 @@ func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart
 		return inputPath, func() {}, nil
 	}
 
-	bitrateKbps, err := audiosig.FFprobeAudioBitrate(ctx, inputPath)
-	if err != nil {
-		logger.WithError(err).Debug("[trim] Bitrate lookup failed; using default")
-		bitrateKbps = 0
-	}
-
-	trimOut, err := os.CreateTemp("", "podsync-trim-keep-*.mp3")
+	trimOut, err := os.CreateTemp("", "podsync-trim-keep-*"+encoding.extension)
 	if err != nil {
 		return inputPath, func() {}, fmt.Errorf("create temp output: %w", err)
 	}
 	_ = trimOut.Close()
 	_ = os.Remove(trimOut.Name())
 
-	args := []string{
+	args := append([]string{
 		"-y",
 		"-v", "error",
 		"-nostdin",
 		"-ss", formatDuration(keepStart),
 		"-t", formatDuration(segmentDur),
 		"-i", inputPath,
-		"-c:a", "libmp3lame",
-	}
-	if bitrateKbps > 0 {
-		args = append(args, "-b:a", fmt.Sprintf("%dk", bitrateKbps))
-	} else {
-		args = append(args, "-q:a", "2")
-	}
+	}, encoding.codecArgs(bitrateKbps)...)
 	args = append(args, trimOut.Name())
 	cmd := execCommandContext(ctx, "ffmpeg", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -170,14 +183,14 @@ func (u *Manager) trimKeepRange(ctx context.Context, inputPath string, keepStart
 // trimConcatRanges trims each keep range and concatenates them.
 // Inputs: ctx, inputPath, keepRanges, logger.
 // Outputs: new input path, cleanup func, error.
-func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRanges []timeRange, logger log.FieldLogger) (string, func(), error) {
+func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRanges []timeRange, encoding trimEncoding, bitrateKbps int, logger log.FieldLogger) (string, func(), error) {
 	var segments []string
 	var cleanups []func()
 	for _, keep := range keepRanges {
 		if keep.end <= keep.start {
 			continue
 		}
-		segmentPath, cleanup, err := u.trimKeepRange(ctx, inputPath, keep.start, keep.end, logger)
+		segmentPath, cleanup, err := u.trimKeepRange(ctx, inputPath, keep.start, keep.end, encoding, bitrateKbps, logger)
 		if err != nil {
 			for _, fn := range cleanups {
 				fn()
@@ -194,7 +207,7 @@ func (u *Manager) trimConcatRanges(ctx context.Context, inputPath string, keepRa
 	if len(segments) == 1 {
 		return segments[0], cleanups[0], nil
 	}
-	concatOut, err := os.CreateTemp("", "podsync-trim-merge-*.mp3")
+	concatOut, err := os.CreateTemp("", "podsync-trim-merge-*"+encoding.extension)
 	if err != nil {
 		for _, fn := range cleanups {
 			fn()
